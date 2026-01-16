@@ -8,6 +8,7 @@ import { MODEL_PROVIDER } from '../utils/common.js';
 import { PROMPT_LOG_FILENAME } from '../core/config-manager.js';
 import { handleOllamaRequest, handleOllamaShow } from './ollama-handler.js';
 import { getPluginManager } from '../core/plugin-manager.js';
+import { startRequest as statsStartRequest } from '../services/stats-collector.js';
 
 /**
  * Parse request body as JSON
@@ -79,6 +80,14 @@ export function createRequestHandler(config, providerPoolManager) {
 
         console.log(`\n${new Date().toLocaleString()}`);
         console.log(`[Server] Received request: ${req.method} http://${req.headers.host}${req.url}`);
+
+        // 统计收集：记录请求开始
+        const statsRequestId = statsStartRequest({
+            method: req.method,
+            path: path,
+            providerType: currentConfig.MODEL_PROVIDER
+        });
+        req.statsRequestId = statsRequestId;
 
         // Health check endpoint
         if (method === 'GET' && path === '/health') {

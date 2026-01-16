@@ -5,6 +5,7 @@ import * as crypto from 'crypto'; // Import crypto for MD5 hashing
 import { convertData, getOpenAIStreamChunkStop } from '../convert/convert.js';
 import { ProviderStrategyFactory } from './provider-strategies.js';
 import { getPluginManager } from '../core/plugin-manager.js';
+import { updateRequestInfo, completeRequest as statsCompleteRequest, failRequest as statsFailRequest } from '../services/stats-collector.js';
 
 // ==================== 网络错误处理 ====================
 
@@ -224,11 +225,13 @@ export async function handleUnifiedResponse(res, responsePayload, isStream) {
     }
 }
 
-export async function handleStreamRequest(res, service, model, requestBody, fromProvider, toProvider, PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, pooluuid, customName, retryContext = null) {
+export async function handleStreamRequest(res, service, model, requestBody, fromProvider, toProvider, PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, pooluuid, customName, retryContext = null, statsRequestId = null) {
     let fullResponseText = '';
     let fullResponseJson = '';
     let fullOldResponseJson = '';
     let responseClosed = false;
+    let inputTokens = 0;
+    let outputTokens = 0;
     
     // 重试上下文：包含 CONFIG 和重试计数
     // maxRetries: 凭证切换最大次数（跨凭证），默认 5 次
@@ -271,6 +274,12 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             const chunksToSend = Array.isArray(chunkToSend) ? chunkToSend : [chunkToSend];
 
             for (const chunk of chunksToSend) {
+                // 尝试从 chunk 中提取 token 信息（Claude 格式）
+                if (chunk.type === 'message_delta' && chunk.usage) {
+                    inputTokens = chunk.usage.input_tokens || inputTokens;
+                    outputTokens = chunk.usage.output_tokens || outputTokens;
+                }
+
                 if (addEvent) {
                     // fullOldResponseJson += chunk.type+"\n";
                     // fullResponseJson += chunk.type+"\n";
@@ -295,6 +304,15 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             console.log(`[Provider Pool] Increasing usage count for ${toProvider} (${pooluuid}${customNameDisplay}) after successful stream request`);
             providerPoolManager.markProviderHealthy(toProvider, {
                 uuid: pooluuid
+            });
+        }
+
+        // 统计收集：记录请求成功完成
+        if (statsRequestId) {
+            statsCompleteRequest(statsRequestId, {
+                inputTokens,
+                outputTokens,
+                statusCode: 200
             });
         }
 
@@ -393,6 +411,14 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         res.write(errorPayload);
         res.end();
         responseClosed = true;
+
+        // 统计收集：记录请求失败
+        if (statsRequestId) {
+            statsFailRequest(statsRequestId, {
+                statusCode: error.response?.status || error.statusCode || 500,
+                errorMessage: error.message
+            });
+        }
     } finally {
         if (!responseClosed) {
             res.end();
@@ -404,13 +430,13 @@ export async function handleStreamRequest(res, service, model, requestBody, from
 }
 
 
-export async function handleUnaryRequest(res, service, model, requestBody, fromProvider, toProvider, PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, pooluuid, customName, retryContext = null) {
+export async function handleUnaryRequest(res, service, model, requestBody, fromProvider, toProvider, PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, pooluuid, customName, retryContext = null, statsRequestId = null) {
     // 重试上下文：包含 CONFIG 和重试计数
     // maxRetries: 凭证切换最大次数（跨凭证），默认 5 次
     const maxRetries = retryContext?.maxRetries ?? 5;
     const currentRetry = retryContext?.currentRetry ?? 0;
     const CONFIG = retryContext?.CONFIG;
-    
+
     try{
         // The service returns the response in its native format (toProvider).
         const needsConversion = getProtocolPrefix(fromProvider) !== getProtocolPrefix(toProvider);
@@ -418,6 +444,14 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         // fs.writeFile('oldRequest'+Date.now()+'.json', JSON.stringify(requestBody));
         const nativeResponse = await service.generateContent(model, requestBody);
         const responseText = extractResponseText(nativeResponse, toProvider);
+
+        // 尝试从响应中提取 token 信息
+        let inputTokens = 0;
+        let outputTokens = 0;
+        if (nativeResponse.usage) {
+            inputTokens = nativeResponse.usage.input_tokens || nativeResponse.usage.prompt_tokens || 0;
+            outputTokens = nativeResponse.usage.output_tokens || nativeResponse.usage.completion_tokens || 0;
+        }
 
         // Convert the response back to the client's format (fromProvider), if necessary.
         let clientResponse = nativeResponse;
@@ -437,6 +471,15 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             console.log(`[Provider Pool] Increasing usage count for ${toProvider} (${pooluuid}${customNameDisplay}) after successful unary request`);
             providerPoolManager.markProviderHealthy(toProvider, {
                 uuid: pooluuid
+            });
+        }
+
+        // 统计收集：记录请求成功完成
+        if (statsRequestId) {
+            statsCompleteRequest(statsRequestId, {
+                inputTokens,
+                outputTokens,
+                statusCode: 200
             });
         }
     } catch (error) {
@@ -521,6 +564,14 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         // 使用新方法创建符合 fromProvider 格式的错误响应
         const errorResponse = createErrorResponse(error, fromProvider);
         await handleUnifiedResponse(res, JSON.stringify(errorResponse), false);
+
+        // 统计收集：记录请求失败
+        if (statsRequestId) {
+            statsFailRequest(statsRequestId, {
+                statusCode: error.response?.status || error.statusCode || 500,
+                errorMessage: error.message
+            });
+        }
     }
 }
 
@@ -640,6 +691,18 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         }
     }
 
+    // 统计收集：更新请求的模型和提供商信息
+    if (req.statsRequestId) {
+        updateRequestInfo(req.statsRequestId, {
+            model,
+            isStream,
+            providerType: toProvider,
+            providerUuid: actualUuid,
+            customName: actualCustomName,
+            endpointType
+        });
+    }
+
     // 1. Convert request body from client format to backend format, if necessary.
     let processedRequestBody = originalRequestBody;
     // fs.writeFile('originalRequestBody'+Date.now()+'.json', JSON.stringify(originalRequestBody));
@@ -669,9 +732,9 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     const retryContext = providerPoolManager ? { CONFIG, currentRetry: 0, maxRetries: credentialSwitchMaxRetries } : null;
     
     if (isStream) {
-        await handleStreamRequest(res, service, model, processedRequestBody, fromProvider, toProvider, CONFIG.PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, actualUuid, actualCustomName, retryContext);
+        await handleStreamRequest(res, service, model, processedRequestBody, fromProvider, toProvider, CONFIG.PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, actualUuid, actualCustomName, retryContext, req.statsRequestId);
     } else {
-        await handleUnaryRequest(res, service, model, processedRequestBody, fromProvider, toProvider, CONFIG.PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, actualUuid, actualCustomName, retryContext);
+        await handleUnaryRequest(res, service, model, processedRequestBody, fromProvider, toProvider, CONFIG.PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, actualUuid, actualCustomName, retryContext, req.statsRequestId);
     }
 
     // 执行插件钩子：内容生成后

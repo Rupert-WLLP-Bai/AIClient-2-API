@@ -1,0 +1,16 @@
+{
+  "name": "usage-dashboard",
+  "version": "1.0.0",
+  "description": "AIClient-2-API 使用统计看板",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "express": "^4.21.0",
+    "ws": "^8.19.0"
+  }
+}
