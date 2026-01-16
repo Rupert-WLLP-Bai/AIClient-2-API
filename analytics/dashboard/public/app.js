@@ -1,44 +1,107 @@
-/**
- * 使用统计看板前端逻辑
- */
-
-// API 基础路径
 const API_BASE = '';
-
-// 当前时间范围
 let currentTimeRange = '1h';
-
-// 图表实例
+let customDateRange = null;
 let modelChart = null;
 let tokenChart = null;
-
-// WebSocket 连接
 let ws = null;
+let flatpickrInstance = null;
+let recentData = [];
 
-// 初始化
 document.addEventListener('DOMContentLoaded', () => {
     initTimeFilter();
     initWebSocket();
+    initDatePicker();
+    initModal();
     loadAllData();
+    
+    window.addEventListener('theme-changed', () => {
+        if (modelChart) loadModelStats();
+        if (tokenChart) loadTokenTrend();
+    });
 });
 
-// 初始化时间筛选器
+function initDatePicker() {
+    flatpickrInstance = flatpickr("#date-picker", {
+        mode: "range",
+        dateFormat: "Y-m-d",
+        onClose: (selectedDates) => {
+            if (selectedDates.length === 2) {
+                customDateRange = {
+                    start: selectedDates[0],
+                    end: selectedDates[1]
+                };
+                currentTimeRange = 'custom';
+                
+                const buttons = document.querySelectorAll('.time-filter button');
+                buttons.forEach(b => {
+                    b.classList.remove('active', 'bg-white', 'dark:bg-slate-700', 'shadow-sm', 'text-primary-600', 'dark:text-primary-400');
+                    b.classList.add('text-slate-500');
+                });
+                const customBtn = document.getElementById('custom-range-btn');
+                customBtn.classList.add('active', 'bg-white', 'dark:bg-slate-700', 'shadow-sm', 'text-primary-600', 'dark:text-primary-400');
+                customBtn.classList.remove('text-slate-500');
+                
+                loadAllData();
+            }
+        }
+    });
+}
+
+function initModal() {
+    const modal = document.getElementById('log-detail-modal');
+    const closeBtns = [
+        document.getElementById('close-modal'),
+        document.getElementById('modal-close-btn')
+    ];
+    
+    closeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        });
+    });
+    
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        }
+    });
+}
+
 function initTimeFilter() {
     const buttons = document.querySelectorAll('.time-filter button');
     buttons.forEach(btn => {
         btn.addEventListener('click', () => {
-            buttons.forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
+            if (btn.dataset.range === 'custom') {
+                flatpickrInstance.open();
+                return;
+            }
+            
+            buttons.forEach(b => {
+                b.classList.remove('active', 'bg-white', 'dark:bg-slate-700', 'shadow-sm', 'text-primary-600', 'dark:text-primary-400');
+                b.classList.add('text-slate-500');
+            });
+            
+            btn.classList.add('active', 'bg-white', 'dark:bg-slate-700', 'shadow-sm', 'text-primary-600', 'dark:text-primary-400');
+            btn.classList.remove('text-slate-500');
+            
             currentTimeRange = btn.dataset.range;
             loadAllData();
         });
     });
+    
+    const activeBtn = document.querySelector('.time-filter button.active');
+    if (activeBtn) {
+        activeBtn.classList.add('bg-white', 'dark:bg-slate-700', 'shadow-sm', 'text-primary-600', 'dark:text-primary-400');
+        activeBtn.classList.remove('text-slate-500');
+    }
 }
 
-// 获取时间范围参数
 function getTimeParams() {
     const now = new Date();
     let startTime = null;
+    let endTime = null;
 
     switch (currentTimeRange) {
         case '1h':
@@ -53,14 +116,24 @@ function getTimeParams() {
         case '30d':
             startTime = new Date(now - 30 * 24 * 60 * 60 * 1000);
             break;
+        case 'custom':
+            if (customDateRange) {
+                startTime = new Date(customDateRange.start);
+                startTime.setHours(0, 0, 0, 0);
+                endTime = new Date(customDateRange.end);
+                endTime.setHours(23, 59, 59, 999);
+            }
+            break;
         case 'all':
             return {};
     }
 
-    return startTime ? { startTime: startTime.toISOString() } : {};
+    const params = {};
+    if (startTime) params.startTime = startTime.toISOString();
+    if (endTime) params.endTime = endTime.toISOString();
+    return params;
 }
 
-// 初始化 WebSocket
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}`;
@@ -68,20 +141,34 @@ function initWebSocket() {
     ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-        document.getElementById('connection-status').textContent = '已连接';
-        document.querySelector('.status-dot').style.background = '#22c55e';
+        const statusEl = document.getElementById('connection-status');
+        if (statusEl) statusEl.textContent = 'Connected';
+        const dots = document.querySelectorAll('.status-dot-pulse, .relative.inline-flex.rounded-full.h-3.w-3');
+        dots.forEach(dot => {
+            dot.classList.remove('bg-red-500', 'bg-amber-500');
+            dot.classList.add('bg-green-500');
+        });
     };
 
     ws.onclose = () => {
-        document.getElementById('connection-status').textContent = '已断开';
-        document.querySelector('.status-dot').style.background = '#ef4444';
-        // 尝试重连
+        const statusEl = document.getElementById('connection-status');
+        if (statusEl) statusEl.textContent = 'Disconnected';
+        const dots = document.querySelectorAll('.status-dot-pulse, .relative.inline-flex.rounded-full.h-3.w-3');
+        dots.forEach(dot => {
+            dot.classList.remove('bg-green-500', 'bg-amber-500');
+            dot.classList.add('bg-red-500');
+        });
         setTimeout(initWebSocket, 5000);
     };
 
     ws.onerror = () => {
-        document.getElementById('connection-status').textContent = '连接错误';
-        document.querySelector('.status-dot').style.background = '#f59e0b';
+        const statusEl = document.getElementById('connection-status');
+        if (statusEl) statusEl.textContent = 'Error';
+        const dots = document.querySelectorAll('.status-dot-pulse, .relative.inline-flex.rounded-full.h-3.w-3');
+        dots.forEach(dot => {
+            dot.classList.remove('bg-green-500', 'bg-red-500');
+            dot.classList.add('bg-amber-500');
+        });
     };
 
     ws.onmessage = (event) => {
@@ -94,18 +181,15 @@ function initWebSocket() {
     };
 }
 
-// 处理 WebSocket 消息
 function handleWebSocketMessage(message) {
     if (message.event === 'realtime_stats') {
         updateRealtimeStats(message.data);
     }
-    // 收到新请求事件时刷新数据
-    if (message.event === 'request_complete' || message.event === 'request_error' || message.event === 'request_start') {
+    if (['request_complete', 'request_error', 'request_start'].includes(message.event)) {
         loadAllData();
     }
 }
 
-// 更新实时统计
 function updateRealtimeStats(data) {
     document.getElementById('pending-requests').textContent = data.pending_requests || 0;
     document.getElementById('requests-last-minute').textContent = data.requests_last_minute || 0;
@@ -115,7 +199,6 @@ function updateRealtimeStats(data) {
     document.getElementById('connected-clients').textContent = data.connected_clients || 0;
 }
 
-// 加载所有数据
 async function loadAllData() {
     try {
         await Promise.all([
@@ -126,20 +209,24 @@ async function loadAllData() {
             loadRecentRequests()
         ]);
     } catch (error) {
-        showError('加载数据失败: ' + error.message);
+        showError('Failed to load data: ' + error.message);
     }
 }
 
-// 显示错误
 function showError(message) {
     const container = document.getElementById('error-container');
-    container.innerHTML = `<div class="error-message">${message}</div>`;
+    container.innerHTML = `
+        <div class="bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 px-4 py-3 rounded-xl flex items-center gap-3 animate-bounce">
+            <i data-lucide="alert-circle" class="w-5 h-5"></i>
+            <span class="text-sm font-medium">${message}</span>
+        </div>
+    `;
+    lucide.createIcons();
     setTimeout(() => {
         container.innerHTML = '';
     }, 5000);
 }
 
-// 格式化数字
 function formatNumber(num) {
     if (num === null || num === undefined) return '-';
     if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
@@ -147,27 +234,22 @@ function formatNumber(num) {
     return num.toLocaleString();
 }
 
-// 格式化成本
 function formatCost(cost) {
     if (cost === null || cost === undefined) return '-';
     return '$' + cost.toFixed(4);
 }
 
-// 格式化时间 (UTC+8)
 function formatTime(timestamp) {
     const date = new Date(timestamp);
-    // 转换为 UTC+8
     const utc8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000);
     return utc8Date.toISOString().slice(11, 19);
 }
 
-// 截断 UUID
 function shortUuid(uuid) {
     if (!uuid) return '-';
     return uuid.substring(0, 8) + '...';
 }
 
-// 加载总体统计
 async function loadSummary() {
     const params = new URLSearchParams(getTimeParams());
     const response = await fetch(`${API_BASE}/api/stats/summary?${params}`);
@@ -176,29 +258,42 @@ async function loadSummary() {
     if (!result.success) throw new Error(result.error);
 
     const data = result.data;
-
-    document.getElementById('total-requests').textContent = formatNumber(data.total_requests);
+    const totalRequestsEl = document.getElementById('total-requests');
+    totalRequestsEl.textContent = formatNumber(data.total_requests);
+    totalRequestsEl.classList.remove('skeleton', 'w-20', 'h-8');
 
     const successRate = data.total_requests > 0
         ? ((data.success_count / data.total_requests) * 100).toFixed(1)
         : 0;
-    document.getElementById('success-rate').textContent = `成功率: ${successRate}%`;
+    
+    const rateEl = document.getElementById('success-rate');
+    rateEl.textContent = `Success Rate: ${successRate}%`;
+    rateEl.className = `text-xs font-medium ${successRate >= 95 ? 'text-green-500' : successRate >= 80 ? 'text-amber-500' : 'text-red-500'}`;
 
     const totalTokens = (data.total_input_tokens || 0) + (data.total_output_tokens || 0);
-    document.getElementById('total-tokens').textContent = formatNumber(totalTokens);
+    const totalTokensEl = document.getElementById('total-tokens');
+    totalTokensEl.textContent = formatNumber(totalTokens);
+    totalTokensEl.classList.remove('skeleton', 'w-24', 'h-8');
+    
     document.getElementById('tokens-breakdown').textContent =
-        `输入: ${formatNumber(data.total_input_tokens)} / 输出: ${formatNumber(data.total_output_tokens)}`;
+        `In: ${formatNumber(data.total_input_tokens)} / Out: ${formatNumber(data.total_output_tokens)}`;
 
-    document.getElementById('total-cost').textContent = formatCost(data.total_cost);
-    document.getElementById('avg-response').textContent =
-        data.avg_response_time ? Math.round(data.avg_response_time) : '-';
+    const totalCostEl = document.getElementById('total-cost');
+    totalCostEl.textContent = formatCost(data.total_cost);
+    totalCostEl.classList.remove('skeleton', 'w-20', 'h-8');
 
-    document.getElementById('unique-models').textContent = data.unique_models || 0;
+    const avgResponseEl = document.getElementById('avg-response');
+    avgResponseEl.textContent = data.avg_response_time ? Math.round(data.avg_response_time) + 'ms' : '-';
+    avgResponseEl.classList.remove('skeleton', 'w-16', 'h-8');
+
+    const uniqueModelsEl = document.getElementById('unique-models');
+    uniqueModelsEl.textContent = data.unique_models || 0;
+    uniqueModelsEl.classList.remove('skeleton', 'w-12', 'h-8');
+
     document.getElementById('unique-providers').textContent =
-        `${data.unique_providers || 0} 个活跃账号`;
+        `${data.unique_providers || 0} Active Accounts`;
 }
 
-// 加载模型统计
 async function loadModelStats() {
     const params = new URLSearchParams({ ...getTimeParams(), limit: 10 });
     const response = await fetch(`${API_BASE}/api/stats/models?${params}`);
@@ -207,17 +302,14 @@ async function loadModelStats() {
     if (!result.success) throw new Error(result.error);
 
     const data = result.data;
-
-    // 更新图表
     const ctx = document.getElementById('model-chart').getContext('2d');
+    const isDark = document.documentElement.classList.contains('dark');
 
-    if (modelChart) {
-        modelChart.destroy();
-    }
+    if (modelChart) modelChart.destroy();
 
     const colors = [
-        '#4f46e5', '#7c3aed', '#ec4899', '#f59e0b', '#22c55e',
-        '#06b6d4', '#3b82f6', '#8b5cf6', '#f43f5e', '#84cc16'
+        '#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981',
+        '#06b6d4', '#3b82f6', '#d946ef', '#f43f5e', '#84cc16'
     ];
 
     modelChart = new Chart(ctx, {
@@ -227,29 +319,40 @@ async function loadModelStats() {
             datasets: [{
                 data: data.map(d => d.total_requests),
                 backgroundColor: colors.slice(0, data.length),
+                hoverOffset: 15,
                 borderWidth: 0
             }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            cutout: '70%',
             plugins: {
                 legend: {
                     position: 'right',
                     labels: {
-                        color: '#9ca3af',
-                        font: { size: 11 },
-                        padding: 10
+                        color: isDark ? '#9ca3af' : '#4b5563',
+                        usePointStyle: true,
+                        pointStyle: 'circle',
+                        font: { size: 12, weight: '500' },
+                        padding: 20
                     }
                 },
                 tooltip: {
+                    backgroundColor: isDark ? '#1e293b' : '#ffffff',
+                    titleColor: isDark ? '#f1f5f9' : '#1e293b',
+                    bodyColor: isDark ? '#9ca3af' : '#4b5563',
+                    borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
+                    borderWidth: 1,
+                    padding: 12,
+                    displayColors: true,
                     callbacks: {
                         label: (context) => {
                             const item = data[context.dataIndex];
                             return [
-                                `请求数: ${formatNumber(item.total_requests)}`,
-                                `Tokens: ${formatNumber((item.total_input_tokens || 0) + (item.total_output_tokens || 0))}`,
-                                `成本: ${formatCost(item.total_cost)}`
+                                ` Requests: ${formatNumber(item.total_requests)}`,
+                                ` Tokens: ${formatNumber((item.total_input_tokens || 0) + (item.total_output_tokens || 0))}`,
+                                ` Cost: ${formatCost(item.total_cost)}`
                             ];
                         }
                     }
@@ -259,83 +362,114 @@ async function loadModelStats() {
     });
 }
 
-// 加载 Token 趋势
 async function loadTokenTrend() {
-    // 固定使用分钟粒度，过去1小时
-    const startTime = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const params = new URLSearchParams({ startTime, granularity: 'minute' });
+    const timeParams = getTimeParams();
+    let startTime = timeParams.startTime;
+    let endTime = timeParams.endTime;
+    let granularity = 'minute';
+
+    if (!startTime) {
+        startTime = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    } else {
+        const start = new Date(startTime);
+        const end = endTime ? new Date(endTime) : new Date();
+        const diffHours = (end - start) / (1000 * 60 * 60);
+        
+        if (diffHours > 48) granularity = 'hour';
+        if (diffHours > 24 * 7) granularity = 'day';
+    }
+
+    const params = new URLSearchParams({ startTime, granularity });
+    if (endTime) params.append('endTime', endTime);
+    
     const response = await fetch(`${API_BASE}/api/stats/tokens/trend?${params}`);
     const result = await response.json();
 
     if (!result.success) throw new Error(result.error);
 
     const data = result.data;
-
     const ctx = document.getElementById('token-chart').getContext('2d');
+    const isDark = document.documentElement.classList.contains('dark');
 
-    if (tokenChart) {
-        tokenChart.destroy();
-    }
+    if (tokenChart) tokenChart.destroy();
+
+    const gradientIn = ctx.createLinearGradient(0, 0, 0, 400);
+    gradientIn.addColorStop(0, 'rgba(59, 130, 246, 0.2)');
+    gradientIn.addColorStop(1, 'rgba(59, 130, 246, 0)');
+
+    const gradientOut = ctx.createLinearGradient(0, 0, 0, 400);
+    gradientOut.addColorStop(0, 'rgba(16, 185, 129, 0.2)');
+    gradientOut.addColorStop(1, 'rgba(16, 185, 129, 0)');
 
     tokenChart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: data.map(d => {
-                // 解析时间并转换为 UTC+8
-                const [datePart, timePart] = d.time_bucket.split(' ');
-                const date = new Date(datePart + 'T' + timePart + ':00Z');
+                const date = new Date(d.time_bucket.replace(' ', 'T') + 'Z');
                 const utc8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-                return utc8Date.toISOString().slice(11, 16); // HH:MM
+                
+                if (granularity === 'day') return utc8Date.toISOString().slice(5, 10);
+                if (granularity === 'hour') return utc8Date.toISOString().slice(5, 13).replace('T', ' ');
+                return utc8Date.toISOString().slice(11, 16);
             }),
             datasets: [
                 {
-                    label: '输入 Tokens',
+                    label: 'Input Tokens',
                     data: data.map(d => d.input_tokens || 0),
                     borderColor: '#3b82f6',
-                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    backgroundColor: gradientIn,
                     fill: true,
-                    tension: 0.4
+                    tension: 0.4,
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    borderWidth: 2
                 },
                 {
-                    label: '输出 Tokens',
+                    label: 'Output Tokens',
                     data: data.map(d => d.output_tokens || 0),
-                    borderColor: '#22c55e',
-                    backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                    borderColor: '#10b981',
+                    backgroundColor: gradientOut,
                     fill: true,
-                    tension: 0.4
+                    tension: 0.4,
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    borderWidth: 2
                 }
             ]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            interaction: {
-                intersect: false,
-                mode: 'index'
-            },
+            interaction: { intersect: false, mode: 'index' },
             plugins: {
                 legend: {
+                    position: 'top',
+                    align: 'end',
                     labels: {
-                        color: '#9ca3af'
+                        color: isDark ? '#9ca3af' : '#4b5563',
+                        usePointStyle: true,
+                        pointStyle: 'circle',
+                        font: { size: 12, weight: '500' }
                     }
+                },
+                tooltip: {
+                    backgroundColor: isDark ? '#1e293b' : '#ffffff',
+                    titleColor: isDark ? '#f1f5f9' : '#1e293b',
+                    bodyColor: isDark ? '#9ca3af' : '#4b5563',
+                    borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
+                    borderWidth: 1,
+                    padding: 12
                 }
             },
             scales: {
                 x: {
-                    grid: {
-                        color: 'rgba(255, 255, 255, 0.05)'
-                    },
-                    ticks: {
-                        color: '#6b7280',
-                        maxTicksLimit: 12
-                    }
+                    grid: { display: false },
+                    ticks: { color: isDark ? '#64748b' : '#94a3b8', maxTicksLimit: 12 }
                 },
                 y: {
-                    grid: {
-                        color: 'rgba(255, 255, 255, 0.05)'
-                    },
+                    grid: { color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)' },
                     ticks: {
-                        color: '#6b7280',
+                        color: isDark ? '#64748b' : '#94a3b8',
                         callback: (value) => formatNumber(value)
                     }
                 }
@@ -344,9 +478,9 @@ async function loadTokenTrend() {
     });
 }
 
-// 加载 Provider 排行
 async function loadProviderRanking() {
-    const response = await fetch(`${API_BASE}/api/stats/providers?limit=20`);
+    const params = new URLSearchParams({ ...getTimeParams(), limit: 20 });
+    const response = await fetch(`${API_BASE}/api/stats/providers?${params}`);
     const result = await response.json();
 
     if (!result.success) throw new Error(result.error);
@@ -355,63 +489,135 @@ async function loadProviderRanking() {
     const tbody = document.getElementById('provider-table');
 
     if (data.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="loading">暂无数据</td></tr>';
-        return;
-    }
-
-    tbody.innerHTML = data.map(item => `
-        <tr>
-            <td>${item.provider_type || '-'}</td>
-            <td class="uuid-short" title="${item.provider_uuid}">${shortUuid(item.provider_uuid)}</td>
-            <td>${formatNumber(item.total_requests)}</td>
-            <td>
-                <span class="badge ${item.success_rate >= 95 ? 'badge-success' : item.success_rate >= 80 ? 'badge-warning' : 'badge-error'}">
-                    ${item.success_rate || 0}%
-                </span>
-            </td>
-            <td>${formatNumber(item.total_tokens)}</td>
-            <td class="cost-value">${formatCost(item.total_cost)}</td>
-        </tr>
-    `).join('');
-}
-
-// 加载最近请求
-async function loadRecentRequests() {
-    const response = await fetch(`${API_BASE}/api/stats/recent?limit=50`);
-    const result = await response.json();
-
-    if (!result.success) throw new Error(result.error);
-
-    const data = result.data;
-    const tbody = document.getElementById('recent-table');
-
-    if (data.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="loading">暂无数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="px-6 py-8 text-center text-slate-500">No data available</td></tr>';
         return;
     }
 
     tbody.innerHTML = data.map(item => {
-        const statusClass = item.status === 'success' ? 'badge-success'
-            : item.status === 'error' ? 'badge-error'
-            : 'badge-warning';
-        const statusText = item.status === 'success' ? '成功'
-            : item.status === 'error' ? '失败'
-            : '处理中';
-
+        const rate = item.success_rate || 0;
+        const badgeClass = rate >= 95 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                        : rate >= 80 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+                        : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
+        
         return `
-            <tr>
-                <td>${formatTime(item.timestamp)}</td>
-                <td>${item.model || '-'}</td>
-                <td><span class="badge ${statusClass}">${statusText}</span></td>
-                <td>${formatNumber((item.input_tokens || 0) + (item.output_tokens || 0))}</td>
-                <td>${item.response_time_ms ? item.response_time_ms + 'ms' : '-'}</td>
+            <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                <td class="px-6 py-4 font-medium flex items-center gap-2">
+                    <div class="w-6 h-6 rounded bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
+                        <i data-lucide="shield" class="w-3.5 h-3.5 text-slate-500"></i>
+                    </div>
+                    ${item.provider_type || '-'}
+                </td>
+                <td class="px-6 py-4 text-xs font-mono text-slate-500" title="${item.provider_uuid}">${shortUuid(item.provider_uuid)}</td>
+                <td class="px-6 py-4 font-semibold">${formatNumber(item.total_requests)}</td>
+                <td class="px-6 py-4">
+                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${badgeClass}">
+                        ${rate}%
+                    </span>
+                </td>
+                <td class="px-6 py-4 text-slate-500">${formatNumber(item.total_tokens)}</td>
+                <td class="px-6 py-4 font-medium text-green-600 dark:text-green-400">${formatCost(item.total_cost)}</td>
             </tr>
         `;
     }).join('');
+    
+    lucide.createIcons();
 }
 
-// 定期刷新数据
+async function loadRecentRequests() {
+    const params = new URLSearchParams(getTimeParams());
+    const response = await fetch(`${API_BASE}/api/stats/recent?${params}`);
+    const result = await response.json();
+
+    if (!result.success) throw new Error(result.error);
+
+    recentData = result.data;
+    const tbody = document.getElementById('recent-table');
+
+    if (recentData.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="px-6 py-8 text-center text-slate-500">No requests found</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = recentData.map((item, index) => {
+        const statusClass = item.status === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+            : item.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+            : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400';
+            
+        const statusText = item.status === 'success' ? 'Success'
+            : item.status === 'error' ? 'Failed'
+            : 'Processing';
+            
+        const iconName = item.status === 'success' ? 'check-circle' : item.status === 'error' ? 'x-circle' : 'loader';
+
+        return `
+            <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors cursor-pointer group" onclick="showRequestDetail(${index})">
+                <td class="px-6 py-4 text-slate-500 group-hover:text-primary-500 transition-colors">${formatTime(item.timestamp)}</td>
+                <td class="px-6 py-4 font-medium truncate max-w-[150px]" title="${item.model || '-'}">${item.model || '-'}</td>
+                <td class="px-6 py-4">
+                    <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium ${statusClass}">
+                        <i data-lucide="${iconName}" class="w-3 h-3"></i>
+                        ${statusText}
+                    </span>
+                </td>
+                <td class="px-6 py-4 text-slate-500">${formatNumber((item.input_tokens || 0) + (item.output_tokens || 0))}</td>
+                <td class="px-6 py-4 font-medium">${item.response_time_ms ? item.response_time_ms + 'ms' : '-'}</td>
+            </tr>
+        `;
+    }).join('');
+    
+    lucide.createIcons();
+}
+
+function showRequestDetail(index) {
+    const item = recentData[index];
+    if (!item) return;
+    
+    const modal = document.getElementById('log-detail-modal');
+    const statusIcon = document.getElementById('modal-status-icon');
+    const statusBadge = document.getElementById('modal-status-badge');
+    const errorContainer = document.getElementById('modal-error-container');
+    
+    document.getElementById('modal-timestamp').textContent = new Date(item.timestamp).toLocaleString();
+    document.getElementById('modal-model').textContent = item.model || '-';
+    document.getElementById('modal-tokens').textContent = `${(item.input_tokens || 0) + (item.output_tokens || 0)} / ${item.input_tokens || 0} / ${item.output_tokens || 0}`;
+    document.getElementById('modal-latency').textContent = item.response_time_ms ? item.response_time_ms + 'ms' : '-';
+    document.getElementById('modal-provider-type').textContent = item.provider_type || '-';
+    document.getElementById('modal-provider-uuid').textContent = item.provider_uuid || '-';
+    
+    const costContainer = document.getElementById('modal-cost-container');
+    if (item.cost !== undefined && item.cost !== null) {
+        document.getElementById('modal-cost').textContent = formatCost(item.cost);
+        costContainer.classList.remove('hidden');
+    } else {
+        costContainer.classList.add('hidden');
+    }
+    
+    if (item.status === 'success') {
+        statusIcon.className = 'w-12 h-12 rounded-2xl bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 flex items-center justify-center';
+        statusIcon.innerHTML = '<i data-lucide="check-circle" class="w-7 h-7"></i>';
+        statusBadge.innerHTML = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">Success</span>';
+        errorContainer.classList.add('hidden');
+    } else if (item.status === 'error') {
+        statusIcon.className = 'w-12 h-12 rounded-2xl bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 flex items-center justify-center';
+        statusIcon.innerHTML = '<i data-lucide="alert-triangle" class="w-7 h-7"></i>';
+        statusBadge.innerHTML = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">Failed</span>';
+        errorContainer.classList.remove('hidden');
+        document.getElementById('modal-error-text').textContent = item.error_message || 'Unknown error occurred';
+    } else {
+        statusIcon.className = 'w-12 h-12 rounded-2xl bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 flex items-center justify-center';
+        statusIcon.innerHTML = '<i data-lucide="loader" class="w-7 h-7 animate-spin"></i>';
+        statusBadge.innerHTML = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">Processing</span>';
+        errorContainer.classList.add('hidden');
+    }
+    
+    document.getElementById('modal-json').textContent = JSON.stringify(item, null, 2);
+    
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    lucide.createIcons();
+}
+
 setInterval(() => {
     loadSummary();
     loadRecentRequests();
-}, 30000); // 每 30 秒刷新一次
+}, 30000);
