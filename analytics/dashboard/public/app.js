@@ -7,6 +7,11 @@ let ws = null;
 let flatpickrInstance = null;
 let recentData = [];
 
+// 注册 datalabels 插件
+if (typeof ChartDataLabels !== 'undefined') {
+    Chart.register(ChartDataLabels);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     initTimeFilter();
     initWebSocket();
@@ -302,6 +307,12 @@ async function loadModelStats() {
     if (!result.success) throw new Error(result.error);
 
     const data = result.data;
+
+    // 计算总数用于百分比计算
+    const totalRequests = data.reduce((sum, d) => sum + d.total_requests, 0);
+    const totalTokens = data.reduce((sum, d) => sum + (d.total_input_tokens || 0) + (d.total_output_tokens || 0), 0);
+    const totalCost = data.reduce((sum, d) => sum + (d.total_cost || 0), 0);
+
     const ctx = document.getElementById('model-chart').getContext('2d');
     const isDark = document.documentElement.classList.contains('dark');
 
@@ -313,30 +324,24 @@ async function loadModelStats() {
     ];
 
     modelChart = new Chart(ctx, {
-        type: 'doughnut',
+        type: 'bar',
         data: {
             labels: data.map(d => d.model || 'Unknown'),
             datasets: [{
+                label: 'Requests',
                 data: data.map(d => d.total_requests),
                 backgroundColor: colors.slice(0, data.length),
-                hoverOffset: 15,
-                borderWidth: 0
+                borderRadius: 8,
+                barThickness: 20
             }]
         },
         options: {
+            indexAxis: 'y',
             responsive: true,
             maintainAspectRatio: false,
-            cutout: '70%',
             plugins: {
                 legend: {
-                    position: 'right',
-                    labels: {
-                        color: isDark ? '#9ca3af' : '#4b5563',
-                        usePointStyle: true,
-                        pointStyle: 'circle',
-                        font: { size: 12, weight: '500' },
-                        padding: 20
-                    }
+                    display: false
                 },
                 tooltip: {
                     backgroundColor: isDark ? '#1e293b' : '#ffffff',
@@ -345,21 +350,99 @@ async function loadModelStats() {
                     borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
                     borderWidth: 1,
                     padding: 12,
-                    displayColors: true,
                     callbacks: {
                         label: (context) => {
                             const item = data[context.dataIndex];
+                            const reqPercent = ((item.total_requests / totalRequests) * 100).toFixed(1);
+                            const tokens = (item.total_input_tokens || 0) + (item.total_output_tokens || 0);
+                            const tokenPercent = ((tokens / totalTokens) * 100).toFixed(1);
+                            const costPercent = ((item.total_cost / totalCost) * 100).toFixed(1);
+
                             return [
-                                ` Requests: ${formatNumber(item.total_requests)}`,
-                                ` Tokens: ${formatNumber((item.total_input_tokens || 0) + (item.total_output_tokens || 0))}`,
-                                ` Cost: ${formatCost(item.total_cost)}`
+                                ` Requests: ${formatNumber(item.total_requests)} (${reqPercent}%)`,
+                                ` Tokens: ${formatNumber(tokens)} (${tokenPercent}%)`,
+                                ` Cost: ${formatCost(item.total_cost)} (${costPercent}%)`
                             ];
                         }
+                    }
+                },
+                datalabels: {
+                    anchor: 'end',
+                    align: 'end',
+                    formatter: (value, context) => {
+                        const percent = ((value / totalRequests) * 100).toFixed(1);
+                        return percent + '%';
+                    },
+                    color: isDark ? '#9ca3af' : '#4b5563',
+                    font: {
+                        size: 11,
+                        weight: '600'
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    grid: {
+                        color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)'
+                    },
+                    ticks: {
+                        color: isDark ? '#64748b' : '#94a3b8',
+                        callback: (value) => formatNumber(value)
+                    }
+                },
+                y: {
+                    grid: { display: false },
+                    ticks: {
+                        color: isDark ? '#64748b' : '#94a3b8',
+                        font: { size: 11 }
                     }
                 }
             }
         }
     });
+
+    // 更新数据表格
+    updateModelTable(data, totalRequests, totalTokens, totalCost);
+}
+
+function updateModelTable(data, totalRequests, totalTokens, totalCost) {
+    const tbody = document.getElementById('model-table');
+
+    if (!data || data.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="py-4 text-center text-slate-500">No data available</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = data.map(item => {
+        const reqPercent = ((item.total_requests / totalRequests) * 100).toFixed(1);
+        const tokens = (item.total_input_tokens || 0) + (item.total_output_tokens || 0);
+        const tokenPercent = ((tokens / totalTokens) * 100).toFixed(1);
+        const costPercent = ((item.total_cost / totalCost) * 100).toFixed(1);
+
+        return `
+            <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                <td class="py-3 font-medium">${item.model || 'Unknown'}</td>
+                <td class="py-3 text-right">
+                    <div class="flex flex-col items-end">
+                        <span class="font-semibold">${formatNumber(item.total_requests)}</span>
+                        <span class="text-xs text-slate-500">${reqPercent}%</span>
+                    </div>
+                </td>
+                <td class="py-3 text-right">
+                    <div class="flex flex-col items-end">
+                        <span class="font-semibold">${formatNumber(tokens)}</span>
+                        <span class="text-xs text-slate-500">${tokenPercent}%</span>
+                    </div>
+                </td>
+                <td class="py-3 text-right">
+                    <div class="flex flex-col items-end">
+                        <span class="font-semibold text-green-600 dark:text-green-400">${formatCost(item.total_cost)}</span>
+                        <span class="text-xs text-slate-500">${costPercent}%</span>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
 }
 
 async function loadTokenTrend() {
