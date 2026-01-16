@@ -297,9 +297,16 @@
                         </div>
                     </div>
                     <div class="glass rounded-2xl p-6 flex flex-col">
-                        <h3 class="font-semibold text-lg mb-6">Token Usage Trend</h3>
-                        <div class="flex-1 relative" style="min-height: 400px;">
-                            <canvas id="token-chart"></canvas>
+                        <h3 class="font-semibold text-lg mb-4">Token Usage Trend</h3>
+                        <div class="flex-1 flex flex-col gap-4">
+                            <div class="flex-1 relative">
+                                <p class="text-xs text-slate-500 dark:text-slate-400 mb-2">Input Tokens</p>
+                                <canvas id="token-input-chart"></canvas>
+                            </div>
+                            <div class="flex-1 relative">
+                                <p class="text-xs text-slate-500 dark:text-slate-400 mb-2">Output Tokens</p>
+                                <canvas id="token-output-chart"></canvas>
+                            </div>
                         </div>
                     </div>
                 </div>

@@ -2,7 +2,8 @@ const API_BASE = '';
 let currentTimeRange = '24h';
 let customDateRange = null;
 let modelChart = null;
-let tokenChart = null;
+let tokenInputChart = null;
+let tokenOutputChart = null;
 let ws = null;
 let flatpickrInstance = null;
 let recentData = [];
@@ -326,32 +327,22 @@ async function loadModelStats() {
     modelChart = new Chart(ctx, {
         type: 'bar',
         data: {
-            labels: ['Requests', 'Tokens', 'Cost ($)'],
-            datasets: data.map((item, index) => ({
-                label: item.model || 'Unknown',
-                data: [
-                    item.total_requests,
-                    (item.total_input_tokens || 0) + (item.total_output_tokens || 0),
-                    (item.total_cost || 0) * 1000 // 放大1000倍以便显示
-                ],
-                backgroundColor: colors[index % colors.length],
-                borderRadius: 6
-            }))
+            labels: data.map(d => d.model || 'Unknown'),
+            datasets: [{
+                label: 'Requests',
+                data: data.map(d => d.total_requests),
+                backgroundColor: colors.slice(0, data.length),
+                borderRadius: 8,
+                barThickness: 20
+            }]
         },
         options: {
+            indexAxis: 'y',
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
                 legend: {
-                    display: true,
-                    position: 'top',
-                    labels: {
-                        color: isDark ? '#9ca3af' : '#4b5563',
-                        usePointStyle: true,
-                        pointStyle: 'circle',
-                        font: { size: 11, weight: '500' },
-                        padding: 12
-                    }
+                    display: false
                 },
                 tooltip: {
                     backgroundColor: isDark ? '#1e293b' : '#ffffff',
@@ -362,43 +353,49 @@ async function loadModelStats() {
                     padding: 12,
                     callbacks: {
                         label: (context) => {
-                            const datasetIndex = context.datasetIndex;
-                            const item = data[datasetIndex];
-                            const metricIndex = context.dataIndex;
+                            const item = data[context.dataIndex];
+                            const reqPercent = ((item.total_requests / totalRequests) * 100).toFixed(1);
+                            const tokens = (item.total_input_tokens || 0) + (item.total_output_tokens || 0);
+                            const tokenPercent = ((tokens / totalTokens) * 100).toFixed(1);
+                            const costPercent = ((item.total_cost / totalCost) * 100).toFixed(1);
 
-                            if (metricIndex === 0) {
-                                const reqPercent = ((item.total_requests / totalRequests) * 100).toFixed(1);
-                                return ` ${context.dataset.label}: ${formatNumber(item.total_requests)} (${reqPercent}%)`;
-                            } else if (metricIndex === 1) {
-                                const tokens = (item.total_input_tokens || 0) + (item.total_output_tokens || 0);
-                                const tokenPercent = ((tokens / totalTokens) * 100).toFixed(1);
-                                return ` ${context.dataset.label}: ${formatNumber(tokens)} (${tokenPercent}%)`;
-                            } else if (metricIndex === 2) {
-                                const costPercent = ((item.total_cost / totalCost) * 100).toFixed(1);
-                                return ` ${context.dataset.label}: ${formatCost(item.total_cost)} (${costPercent}%)`;
-                            }
+                            return [
+                                ` Requests: ${formatNumber(item.total_requests)} (${reqPercent}%)`,
+                                ` Tokens: ${formatNumber(tokens)} (${tokenPercent}%)`,
+                                ` Cost: ${formatCost(item.total_cost)} (${costPercent}%)`
+                            ];
                         }
                     }
                 },
                 datalabels: {
-                    display: false // 不显示数据标签
+                    anchor: 'end',
+                    align: 'end',
+                    formatter: (value, context) => {
+                        const percent = ((value / totalRequests) * 100).toFixed(1);
+                        return percent + '%';
+                    },
+                    color: isDark ? '#9ca3af' : '#4b5563',
+                    font: {
+                        size: 11,
+                        weight: '600'
+                    }
                 }
             },
             scales: {
                 x: {
-                    grid: { display: false },
-                    ticks: {
-                        color: isDark ? '#64748b' : '#94a3b8',
-                        font: { size: 11 }
-                    }
-                },
-                y: {
                     grid: {
                         color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)'
                     },
                     ticks: {
                         color: isDark ? '#64748b' : '#94a3b8',
                         callback: (value) => formatNumber(value)
+                    }
+                },
+                y: {
+                    grid: { display: false },
+                    ticks: {
+                        color: isDark ? '#64748b' : '#94a3b8',
+                        font: { size: 11 }
                     }
                 }
             }
@@ -461,84 +458,61 @@ async function loadTokenTrend() {
         const start = new Date(startTime);
         const end = endTime ? new Date(endTime) : new Date();
         const diffHours = (end - start) / (1000 * 60 * 60);
-        
+
         if (diffHours > 48) granularity = 'hour';
         if (diffHours > 24 * 7) granularity = 'day';
     }
 
     const params = new URLSearchParams({ startTime, granularity });
     if (endTime) params.append('endTime', endTime);
-    
+
     const response = await fetch(`${API_BASE}/api/stats/tokens/trend?${params}`);
     const result = await response.json();
 
     if (!result.success) throw new Error(result.error);
 
     const data = result.data;
-    const ctx = document.getElementById('token-chart').getContext('2d');
     const isDark = document.documentElement.classList.contains('dark');
 
-    if (tokenChart) tokenChart.destroy();
+    const labels = data.map(d => {
+        const date = new Date(d.time_bucket.replace(' ', 'T') + 'Z');
+        const utc8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000);
 
-    const gradientIn = ctx.createLinearGradient(0, 0, 0, 400);
-    gradientIn.addColorStop(0, 'rgba(59, 130, 246, 0.2)');
+        if (granularity === 'day') return utc8Date.toISOString().slice(5, 10);
+        if (granularity === 'hour') return utc8Date.toISOString().slice(5, 13).replace('T', ' ');
+        return utc8Date.toISOString().slice(11, 16);
+    });
+
+    // Input Tokens Chart
+    const ctxInput = document.getElementById('token-input-chart').getContext('2d');
+    if (tokenInputChart) tokenInputChart.destroy();
+
+    const gradientIn = ctxInput.createLinearGradient(0, 0, 0, 150);
+    gradientIn.addColorStop(0, 'rgba(59, 130, 246, 0.3)');
     gradientIn.addColorStop(1, 'rgba(59, 130, 246, 0)');
 
-    const gradientOut = ctx.createLinearGradient(0, 0, 0, 400);
-    gradientOut.addColorStop(0, 'rgba(16, 185, 129, 0.2)');
-    gradientOut.addColorStop(1, 'rgba(16, 185, 129, 0)');
-
-    tokenChart = new Chart(ctx, {
+    tokenInputChart = new Chart(ctxInput, {
         type: 'line',
         data: {
-            labels: data.map(d => {
-                const date = new Date(d.time_bucket.replace(' ', 'T') + 'Z');
-                const utc8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-                
-                if (granularity === 'day') return utc8Date.toISOString().slice(5, 10);
-                if (granularity === 'hour') return utc8Date.toISOString().slice(5, 13).replace('T', ' ');
-                return utc8Date.toISOString().slice(11, 16);
-            }),
-            datasets: [
-                {
-                    label: 'Input Tokens',
-                    data: data.map(d => d.input_tokens || 0),
-                    borderColor: '#3b82f6',
-                    backgroundColor: gradientIn,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 0,
-                    pointHoverRadius: 4,
-                    borderWidth: 2
-                },
-                {
-                    label: 'Output Tokens',
-                    data: data.map(d => d.output_tokens || 0),
-                    borderColor: '#10b981',
-                    backgroundColor: gradientOut,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 0,
-                    pointHoverRadius: 4,
-                    borderWidth: 2
-                }
-            ]
+            labels: labels,
+            datasets: [{
+                label: 'Input Tokens',
+                data: data.map(d => d.input_tokens || 0),
+                borderColor: '#3b82f6',
+                backgroundColor: gradientIn,
+                fill: true,
+                tension: 0.4,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+                borderWidth: 2
+            }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             interaction: { intersect: false, mode: 'index' },
             plugins: {
-                legend: {
-                    position: 'top',
-                    align: 'end',
-                    labels: {
-                        color: isDark ? '#9ca3af' : '#4b5563',
-                        usePointStyle: true,
-                        pointStyle: 'circle',
-                        font: { size: 12, weight: '500' }
-                    }
-                },
+                legend: { display: false },
                 tooltip: {
                     backgroundColor: isDark ? '#1e293b' : '#ffffff',
                     titleColor: isDark ? '#f1f5f9' : '#1e293b',
@@ -546,9 +520,61 @@ async function loadTokenTrend() {
                     borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
                     borderWidth: 1,
                     padding: 12
+                }
+            },
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: { color: isDark ? '#64748b' : '#94a3b8', maxTicksLimit: 12 }
                 },
-                datalabels: {
-                    display: false // 不显示数据标签
+                y: {
+                    grid: { color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)' },
+                    ticks: {
+                        color: isDark ? '#64748b' : '#94a3b8',
+                        callback: (value) => formatNumber(value)
+                    }
+                }
+            }
+        }
+    });
+
+    // Output Tokens Chart
+    const ctxOutput = document.getElementById('token-output-chart').getContext('2d');
+    if (tokenOutputChart) tokenOutputChart.destroy();
+
+    const gradientOut = ctxOutput.createLinearGradient(0, 0, 0, 150);
+    gradientOut.addColorStop(0, 'rgba(16, 185, 129, 0.3)');
+    gradientOut.addColorStop(1, 'rgba(16, 185, 129, 0)');
+
+    tokenOutputChart = new Chart(ctxOutput, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Output Tokens',
+                data: data.map(d => d.output_tokens || 0),
+                borderColor: '#10b981',
+                backgroundColor: gradientOut,
+                fill: true,
+                tension: 0.4,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+                borderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: isDark ? '#1e293b' : '#ffffff',
+                    titleColor: isDark ? '#f1f5f9' : '#1e293b',
+                    bodyColor: isDark ? '#9ca3af' : '#4b5563',
+                    borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
+                    borderWidth: 1,
+                    padding: 12
                 }
             },
             scales: {
