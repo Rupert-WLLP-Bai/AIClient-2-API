@@ -1,5 +1,5 @@
 const API_BASE = '';
-let currentTimeRange = '1h';
+let currentTimeRange = '24h';
 let customDateRange = null;
 let modelChart = null;
 let tokenChart = null;
