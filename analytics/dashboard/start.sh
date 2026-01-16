@@ -36,6 +36,7 @@ if [ ! -d "node_modules" ]; then
 fi
 
 # 启动服务器
-echo "[启动] 正在启动看板服务器..."
+echo "[启动] 正在启动看板服务器（开发模式 - 热重载）..."
+echo "[提示] 修改 server.js 或 public/ 下的文件后会自动重启"
 echo
-node server.js
+npm run dev

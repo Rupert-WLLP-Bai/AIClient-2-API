@@ -326,22 +326,32 @@ async function loadModelStats() {
     modelChart = new Chart(ctx, {
         type: 'bar',
         data: {
-            labels: data.map(d => d.model || 'Unknown'),
-            datasets: [{
-                label: 'Requests',
-                data: data.map(d => d.total_requests),
-                backgroundColor: colors.slice(0, data.length),
-                borderRadius: 8,
-                barThickness: 20
-            }]
+            labels: ['Requests', 'Tokens', 'Cost ($)'],
+            datasets: data.map((item, index) => ({
+                label: item.model || 'Unknown',
+                data: [
+                    item.total_requests,
+                    (item.total_input_tokens || 0) + (item.total_output_tokens || 0),
+                    (item.total_cost || 0) * 1000 // 放大1000倍以便显示
+                ],
+                backgroundColor: colors[index % colors.length],
+                borderRadius: 6
+            }))
         },
         options: {
-            indexAxis: 'y',
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
                 legend: {
-                    display: false
+                    display: true,
+                    position: 'top',
+                    labels: {
+                        color: isDark ? '#9ca3af' : '#4b5563',
+                        usePointStyle: true,
+                        pointStyle: 'circle',
+                        font: { size: 11, weight: '500' },
+                        padding: 12
+                    }
                 },
                 tooltip: {
                     backgroundColor: isDark ? '#1e293b' : '#ffffff',
@@ -352,49 +362,43 @@ async function loadModelStats() {
                     padding: 12,
                     callbacks: {
                         label: (context) => {
-                            const item = data[context.dataIndex];
-                            const reqPercent = ((item.total_requests / totalRequests) * 100).toFixed(1);
-                            const tokens = (item.total_input_tokens || 0) + (item.total_output_tokens || 0);
-                            const tokenPercent = ((tokens / totalTokens) * 100).toFixed(1);
-                            const costPercent = ((item.total_cost / totalCost) * 100).toFixed(1);
+                            const datasetIndex = context.datasetIndex;
+                            const item = data[datasetIndex];
+                            const metricIndex = context.dataIndex;
 
-                            return [
-                                ` Requests: ${formatNumber(item.total_requests)} (${reqPercent}%)`,
-                                ` Tokens: ${formatNumber(tokens)} (${tokenPercent}%)`,
-                                ` Cost: ${formatCost(item.total_cost)} (${costPercent}%)`
-                            ];
+                            if (metricIndex === 0) {
+                                const reqPercent = ((item.total_requests / totalRequests) * 100).toFixed(1);
+                                return ` ${context.dataset.label}: ${formatNumber(item.total_requests)} (${reqPercent}%)`;
+                            } else if (metricIndex === 1) {
+                                const tokens = (item.total_input_tokens || 0) + (item.total_output_tokens || 0);
+                                const tokenPercent = ((tokens / totalTokens) * 100).toFixed(1);
+                                return ` ${context.dataset.label}: ${formatNumber(tokens)} (${tokenPercent}%)`;
+                            } else if (metricIndex === 2) {
+                                const costPercent = ((item.total_cost / totalCost) * 100).toFixed(1);
+                                return ` ${context.dataset.label}: ${formatCost(item.total_cost)} (${costPercent}%)`;
+                            }
                         }
                     }
                 },
                 datalabels: {
-                    anchor: 'end',
-                    align: 'end',
-                    formatter: (value, context) => {
-                        const percent = ((value / totalRequests) * 100).toFixed(1);
-                        return percent + '%';
-                    },
-                    color: isDark ? '#9ca3af' : '#4b5563',
-                    font: {
-                        size: 11,
-                        weight: '600'
-                    }
+                    display: false // 不显示数据标签
                 }
             },
             scales: {
                 x: {
+                    grid: { display: false },
+                    ticks: {
+                        color: isDark ? '#64748b' : '#94a3b8',
+                        font: { size: 11 }
+                    }
+                },
+                y: {
                     grid: {
                         color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)'
                     },
                     ticks: {
                         color: isDark ? '#64748b' : '#94a3b8',
                         callback: (value) => formatNumber(value)
-                    }
-                },
-                y: {
-                    grid: { display: false },
-                    ticks: {
-                        color: isDark ? '#64748b' : '#94a3b8',
-                        font: { size: 11 }
                     }
                 }
             }
@@ -542,6 +546,9 @@ async function loadTokenTrend() {
                     borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
                     borderWidth: 1,
                     padding: 12
+                },
+                datalabels: {
+                    display: false // 不显示数据标签
                 }
             },
             scales: {
