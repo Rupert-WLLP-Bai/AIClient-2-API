@@ -19,3 +19,5 @@ configs/codex/
 configs/orchids/*_orchids_creds/
 configs/orchids/*.json
 !configs/orchids/*.example
+
+data
