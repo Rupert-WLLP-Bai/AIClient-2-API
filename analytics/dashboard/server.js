@@ -393,15 +393,14 @@ setInterval(() => {
         const db = getDb();
 
         // 获取最近 1 分钟的统计
-        // 注意：数据库 timestamp 为 ISO8601 格式 (带 T 和 Z)，而 datetime('now') 返回 'YYYY-MM-DD HH:MM:SS'
-        // 需要使用 strftime 保持格式一致，否则字符串比较会出现 T > space 导致条件总是成立
+        // 使用 datetime() 函数进行时间比较，自动处理 ISO8601 格式
         const recentStats = db.prepare(`
             SELECT
                 COUNT(*) as requests_last_minute,
                 SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errors_last_minute,
                 AVG(response_time_ms) as avg_response_time
             FROM request_logs
-            WHERE timestamp >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-1 minute')
+            WHERE datetime(timestamp) >= datetime('now', '-1 minute')
         `).get();
 
         // 获取活跃请求数（pending 状态）
