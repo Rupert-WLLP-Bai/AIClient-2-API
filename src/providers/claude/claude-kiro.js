@@ -1690,7 +1690,8 @@ async initializeAuth(forceRefresh = false) {
 
         try {
             const { responseText, toolCalls } = this._processApiResponse(response);
-            return this.buildClaudeResponse(responseText, false, 'assistant', model, toolCalls, inputTokens);
+            // Use redirectedModel for stats tracking (records actual model used, not requested)
+            return this.buildClaudeResponse(responseText, false, 'assistant', redirectedModel, toolCalls, inputTokens);
         } catch (error) {
             console.error('[Kiro] Error in generateContent:', error);
             throw new Error(`Error processing response: ${error.message}`);
@@ -2120,7 +2121,7 @@ async initializeAuth(forceRefresh = false) {
                     id: messageId,
                     type: "message",
                     role: "assistant",
-                    model: model,
+                    model: redirectedModel, // Use redirectedModel for stats tracking
                     usage: {
                         input_tokens: estimatedInputTokens,
                         output_tokens: 0,
