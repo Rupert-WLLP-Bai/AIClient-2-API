@@ -2,15 +2,13 @@ const API_BASE = '';
 let currentTimeRange = '24h';
 let customDateRange = null;
 let modelChart = null;
-let tokenChart = null;
+let tokenInputChart = null;
+let tokenOutputChart = null;
 let ws = null;
 let flatpickrInstance = null;
 let recentData = [];
 
-// 注册 datalabels 插件
-if (typeof ChartDataLabels !== 'undefined') {
-    Chart.register(ChartDataLabels);
-}
+// 不要全局注册 datalabels 插件，而是在需要的图表中单独启用
 
 document.addEventListener('DOMContentLoaded', () => {
     initTimeFilter();
@@ -21,7 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     window.addEventListener('theme-changed', () => {
         if (modelChart) loadModelStats();
-        if (tokenChart) loadTokenTrend();
+        if (tokenInputChart || tokenOutputChart) loadTokenTrend();
     });
 });
 
@@ -398,7 +396,8 @@ async function loadModelStats() {
                     }
                 }
             }
-        }
+        },
+        plugins: [ChartDataLabels]  // 只在这个图表中启用 datalabels 插件
     });
 
     // 更新数据表格
@@ -471,70 +470,105 @@ async function loadTokenTrend() {
     if (!result.success) throw new Error(result.error);
 
     const data = result.data;
-    const ctx = document.getElementById('token-chart').getContext('2d');
     const isDark = document.documentElement.classList.contains('dark');
 
-    if (tokenChart) tokenChart.destroy();
+    const labels = data.map(d => {
+        const date = new Date(d.time_bucket.replace(' ', 'T') + 'Z');
+        const utc8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000);
 
-    const gradientIn = ctx.createLinearGradient(0, 0, 0, 400);
-    gradientIn.addColorStop(0, 'rgba(59, 130, 246, 0.2)');
+        if (granularity === 'day') return utc8Date.toISOString().slice(5, 10);
+        if (granularity === 'hour') return utc8Date.toISOString().slice(5, 13).replace('T', ' ');
+        return utc8Date.toISOString().slice(11, 16);
+    });
+
+    // Input Tokens Chart
+    const ctxInput = document.getElementById('token-input-chart').getContext('2d');
+    if (tokenInputChart) tokenInputChart.destroy();
+
+    const gradientIn = ctxInput.createLinearGradient(0, 0, 0, 150);
+    gradientIn.addColorStop(0, 'rgba(59, 130, 246, 0.3)');
     gradientIn.addColorStop(1, 'rgba(59, 130, 246, 0)');
 
-    const gradientOut = ctx.createLinearGradient(0, 0, 0, 400);
-    gradientOut.addColorStop(0, 'rgba(16, 185, 129, 0.2)');
-    gradientOut.addColorStop(1, 'rgba(16, 185, 129, 0)');
-
-    tokenChart = new Chart(ctx, {
+    tokenInputChart = new Chart(ctxInput, {
         type: 'line',
         data: {
-            labels: data.map(d => {
-                const date = new Date(d.time_bucket.replace(' ', 'T') + 'Z');
-                const utc8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-                
-                if (granularity === 'day') return utc8Date.toISOString().slice(5, 10);
-                if (granularity === 'hour') return utc8Date.toISOString().slice(5, 13).replace('T', ' ');
-                return utc8Date.toISOString().slice(11, 16);
-            }),
-            datasets: [
-                {
-                    label: 'Input Tokens',
-                    data: data.map(d => d.input_tokens || 0),
-                    borderColor: '#3b82f6',
-                    backgroundColor: gradientIn,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 0,
-                    pointHoverRadius: 4,
-                    borderWidth: 2
-                },
-                {
-                    label: 'Output Tokens',
-                    data: data.map(d => d.output_tokens || 0),
-                    borderColor: '#10b981',
-                    backgroundColor: gradientOut,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 0,
-                    pointHoverRadius: 4,
-                    borderWidth: 2
-                }
-            ]
+            labels: labels,
+            datasets: [{
+                label: 'Input Tokens',
+                data: data.map(d => d.input_tokens || 0),
+                borderColor: '#3b82f6',
+                backgroundColor: gradientIn,
+                fill: true,
+                tension: 0.4,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+                borderWidth: 2
+            }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             interaction: { intersect: false, mode: 'index' },
             plugins: {
-                legend: {
-                    position: 'top',
-                    align: 'end',
-                    labels: {
-                        color: isDark ? '#9ca3af' : '#4b5563',
-                        usePointStyle: true,
-                        pointStyle: 'circle',
-                        font: { size: 12, weight: '500' }
-                    }
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: isDark ? '#1e293b' : '#ffffff',
+                    titleColor: isDark ? '#f1f5f9' : '#1e293b',
+                    bodyColor: isDark ? '#9ca3af' : '#4b5563',
+                    borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
+                    borderWidth: 1,
+                    padding: 12
                 },
+                datalabels: {
+                    display: false
+                }
+            },
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: { color: isDark ? '#64748b' : '#94a3b8', maxTicksLimit: 12 }
+                },
+                y: {
+                    grid: { color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)' },
+                    ticks: {
+                        color: isDark ? '#64748b' : '#94a3b8',
+                        callback: (value) => formatNumber(value)
+                    }
+                }
+            }
+        }
+    });
+
+    // Output Tokens Chart
+    const ctxOutput = document.getElementById('token-output-chart').getContext('2d');
+    if (tokenOutputChart) tokenOutputChart.destroy();
+
+    const gradientOut = ctxOutput.createLinearGradient(0, 0, 0, 150);
+    gradientOut.addColorStop(0, 'rgba(16, 185, 129, 0.3)');
+    gradientOut.addColorStop(1, 'rgba(16, 185, 129, 0)');
+
+    tokenOutputChart = new Chart(ctxOutput, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Output Tokens',
+                data: data.map(d => d.output_tokens || 0),
+                borderColor: '#10b981',
+                backgroundColor: gradientOut,
+                fill: true,
+                tension: 0.4,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+                borderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: {
+                legend: { display: false },
                 tooltip: {
                     backgroundColor: isDark ? '#1e293b' : '#ffffff',
                     titleColor: isDark ? '#f1f5f9' : '#1e293b',
