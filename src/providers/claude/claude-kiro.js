@@ -1642,6 +1642,28 @@ async initializeAuth(forceRefresh = false) {
         return { responseText: fullResponseText, toolCalls: uniqueToolCalls };
     }
 
+    /**
+     * Redirect opus and haiku models to sonnet-4-5
+     * This ensures all opus and haiku requests use the more stable sonnet-4-5 model
+     * @param {string} model - Original model name
+     * @returns {string} Redirected model name or original if no redirection needed
+     * @private
+     */
+    _redirectModelIfNeeded(model) {
+        if (!model) return model;
+
+        const modelLower = model.toLowerCase();
+
+        // Check if model contains 'opus' or 'haiku' (case-insensitive)
+        if (modelLower.includes('opus') || modelLower.includes('haiku')) {
+            const redirectedModel = 'claude-sonnet-4-5';
+            console.log(`[Kiro] Model redirected: ${model} → ${redirectedModel}`);
+            return redirectedModel;
+        }
+
+        return model;
+    }
+
     async generateContent(model, requestBody) {
         if (!this.isInitialized) await this.initialize();
 
@@ -1655,8 +1677,10 @@ async initializeAuth(forceRefresh = false) {
             console.log('[Kiro] Token is near expiry, triggering background refresh...');
             this.triggerBackgroundRefresh();
         }
-        
-        const finalModel = MODEL_MAPPING[model] ? model : this.modelName;
+
+        // Redirect opus/haiku models to sonnet-4-5
+        const redirectedModel = this._redirectModelIfNeeded(model);
+        const finalModel = MODEL_MAPPING[redirectedModel] ? redirectedModel : this.modelName;
         console.log(`[Kiro] Calling generateContent with model: ${finalModel}`);
         
         // Estimate input tokens before making the API call
@@ -1998,8 +2022,10 @@ async initializeAuth(forceRefresh = false) {
             console.log('[Kiro] Token is near expiry, triggering background refresh...');
             this.triggerBackgroundRefresh();
         }
-        
-        const finalModel = MODEL_MAPPING[model] ? model : this.modelName;
+
+        // Redirect opus/haiku models to sonnet-4-5
+        const redirectedModel = this._redirectModelIfNeeded(model);
+        const finalModel = MODEL_MAPPING[redirectedModel] ? redirectedModel : this.modelName;
         console.log(`[Kiro] Calling generateContentStream with model: ${finalModel} (real streaming)`);
 
         let inputTokens = 0;
