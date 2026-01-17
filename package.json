@@ -37,6 +37,7 @@
     "start:standalone": "node src/services/api-server.js",
     "start:dev": "node src/core/master.js --dev",
     "kiro:usage": "node src/scripts/kiro-usage-dashboard.js",
+    "kiro:reset-health": "node scripts/reset-kiro-health.js",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",

@@ -171,7 +171,7 @@ export async function initApiService(config) {
     if (config.providerPools && Object.keys(config.providerPools).length > 0) {
         providerPoolManager = new ProviderPoolManager(config.providerPools, {
             globalConfig: config,
-            maxErrorCount: config.MAX_ERROR_COUNT ?? 3,
+            maxErrorCount: config.MAX_ERROR_COUNT ?? 50,
             providerFallbackChain: config.providerFallbackChain || {},
         });
         console.log('[Initialization] ProviderPoolManager initialized with configured pools.');

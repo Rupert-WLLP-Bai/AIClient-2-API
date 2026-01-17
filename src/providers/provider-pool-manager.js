@@ -27,7 +27,7 @@ export class ProviderPoolManager {
         this.providerStatus = {}; // Tracks health and usage for each provider instance
         this.roundRobinIndex = {}; // Tracks the current index for round-robin selection for each provider type
         // 使用 ?? 运算符确保 0 也能被正确设置，而不是被 || 替换为默认值
-        this.maxErrorCount = options.maxErrorCount ?? 3; // Default to 3 errors before marking unhealthy
+        this.maxErrorCount = options.maxErrorCount ?? 50; // Default to 50 errors before marking unhealthy
         this.healthCheckInterval = options.healthCheckInterval ?? 10 * 60 * 1000; // Default to 10 minutes
 
         // 账号池上限配置：每个 providerType 最多使用多少个健康凭证进行轮询
