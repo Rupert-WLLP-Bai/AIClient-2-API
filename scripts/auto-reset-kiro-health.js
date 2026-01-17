@@ -34,7 +34,7 @@ const PROVIDER_TYPE = 'claude-kiro-oauth';
 const CONFIG_FILE = 'configs/provider_pools.json';
 const SERVER_PORT = process.env.SERVER_PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
-const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL || '20') * 1000; // 默认20秒
+const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL || '10') * 1000; // 默认10秒
 const UNHEALTHY_THRESHOLD = parseFloat(process.env.UNHEALTHY_THRESHOLD || '1.0'); // 默认100%不健康才重置
 
 let isResetting = false; // 防止重复重置
