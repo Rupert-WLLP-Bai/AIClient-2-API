@@ -326,6 +326,150 @@ app.get('/api/stats/recent', (req, res) => {
     }
 });
 
+/**
+ * 获取 Token 使用分析
+ */
+app.get('/api/stats/tokens/analytics', (req, res) => {
+    try {
+        const db = getDb();
+        const { startTime, endTime } = req.query;
+
+        let whereClause = 'WHERE status = \'success\' AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL';
+        const params = {};
+
+        if (startTime) {
+            whereClause += ` AND timestamp >= @startTime`;
+            params.startTime = startTime;
+        }
+        if (endTime) {
+            whereClause += ` AND timestamp <= @endTime`;
+            params.endTime = endTime;
+        }
+
+        // Overall token statistics
+        const overallStats = db.prepare(`
+            SELECT
+                COUNT(*) as total_requests,
+                AVG(input_tokens + output_tokens) as avg_tokens_per_request,
+                AVG(input_tokens) as avg_input_tokens,
+                AVG(output_tokens) as avg_output_tokens,
+                SUM(input_tokens) as total_input_tokens,
+                SUM(output_tokens) as total_output_tokens,
+                SUM(estimated_cost) as total_cost,
+                CASE
+                    WHEN SUM(input_tokens + output_tokens) > 0
+                    THEN CAST(SUM(input_tokens) AS FLOAT) / (SUM(input_tokens) + SUM(output_tokens)) * 100
+                    ELSE 0
+                END as input_ratio,
+                CASE
+                    WHEN SUM(input_tokens + output_tokens) > 0
+                    THEN CAST(SUM(output_tokens) AS FLOAT) / (SUM(input_tokens) + SUM(output_tokens)) * 100
+                    ELSE 0
+                END as output_ratio,
+                CASE
+                    WHEN SUM(estimated_cost) > 0
+                    THEN (SUM(input_tokens) + SUM(output_tokens)) / SUM(estimated_cost)
+                    ELSE 0
+                END as tokens_per_dollar
+            FROM request_logs
+            ${whereClause}
+        `).get(params);
+
+        // Token statistics by model
+        const modelStats = db.prepare(`
+            SELECT
+                model,
+                COUNT(*) as request_count,
+                AVG(input_tokens + output_tokens) as avg_tokens_per_request,
+                AVG(input_tokens) as avg_input_tokens,
+                AVG(output_tokens) as avg_output_tokens,
+                SUM(input_tokens + output_tokens) as total_tokens,
+                SUM(estimated_cost) as total_cost,
+                CASE
+                    WHEN SUM(input_tokens + output_tokens) > 0
+                    THEN CAST(SUM(input_tokens) AS FLOAT) / (SUM(input_tokens) + SUM(output_tokens)) * 100
+                    ELSE 0
+                END as input_ratio,
+                CASE
+                    WHEN SUM(estimated_cost) > 0
+                    THEN (SUM(input_tokens) + SUM(output_tokens)) / SUM(estimated_cost)
+                    ELSE 0
+                END as tokens_per_dollar,
+                CASE
+                    WHEN SUM(input_tokens + output_tokens) > 0
+                    THEN (SUM(estimated_cost) / (SUM(input_tokens) + SUM(output_tokens))) * 1000
+                    ELSE 0
+                END as cost_per_1k_tokens
+            FROM request_logs
+            ${whereClause}
+            GROUP BY model
+            ORDER BY total_tokens DESC
+        `).all(params);
+
+        // Token distribution (histogram data)
+        const distribution = db.prepare(`
+            SELECT
+                CASE
+                    WHEN (input_tokens + output_tokens) < 1000 THEN '0-1K'
+                    WHEN (input_tokens + output_tokens) < 5000 THEN '1K-5K'
+                    WHEN (input_tokens + output_tokens) < 10000 THEN '5K-10K'
+                    WHEN (input_tokens + output_tokens) < 20000 THEN '10K-20K'
+                    WHEN (input_tokens + output_tokens) < 50000 THEN '20K-50K'
+                    WHEN (input_tokens + output_tokens) < 100000 THEN '50K-100K'
+                    ELSE '100K+'
+                END as token_range,
+                COUNT(*) as request_count
+            FROM request_logs
+            ${whereClause}
+            GROUP BY token_range
+            ORDER BY
+                CASE token_range
+                    WHEN '0-1K' THEN 1
+                    WHEN '1K-5K' THEN 2
+                    WHEN '5K-10K' THEN 3
+                    WHEN '10K-20K' THEN 4
+                    WHEN '20K-50K' THEN 5
+                    WHEN '50K-100K' THEN 6
+                    WHEN '100K+' THEN 7
+                END
+        `).all(params);
+
+        // Token percentiles
+        const percentiles = db.prepare(`
+            WITH token_totals AS (
+                SELECT (input_tokens + output_tokens) as total_tokens
+                FROM request_logs
+                ${whereClause}
+                ORDER BY total_tokens
+            ),
+            counts AS (
+                SELECT COUNT(*) as cnt FROM token_totals
+            )
+            SELECT
+                (SELECT total_tokens FROM token_totals LIMIT 1 OFFSET (SELECT CAST(cnt * 0.50 AS INTEGER) FROM counts)) as p50,
+                (SELECT total_tokens FROM token_totals LIMIT 1 OFFSET (SELECT CAST(cnt * 0.75 AS INTEGER) FROM counts)) as p75,
+                (SELECT total_tokens FROM token_totals LIMIT 1 OFFSET (SELECT CAST(cnt * 0.90 AS INTEGER) FROM counts)) as p90,
+                (SELECT total_tokens FROM token_totals LIMIT 1 OFFSET (SELECT CAST(cnt * 0.95 AS INTEGER) FROM counts)) as p95,
+                (SELECT total_tokens FROM token_totals LIMIT 1 OFFSET (SELECT CAST(cnt * 0.99 AS INTEGER) FROM counts)) as p99
+        `).get(params);
+
+        db.close();
+
+        res.json({
+            success: true,
+            data: {
+                overall: overallStats,
+                by_model: modelStats,
+                distribution: distribution,
+                percentiles: percentiles
+            }
+        });
+    } catch (error) {
+        console.error('Error getting token analytics:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // WebSocket 连接处理
 const clients = new Set();
 
