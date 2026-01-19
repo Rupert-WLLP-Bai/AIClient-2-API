@@ -37,6 +37,8 @@
     "start:standalone": "node src/services/api-server.js",
     "start:dev": "node src/core/master.js --dev",
     "kiro:usage": "node src/scripts/kiro-usage-dashboard.js",
+    "kiro:compare": "node scripts/kiro-usage-compare.js",
+    "kiro:history": "node scripts/kiro-usage-compare.js --history",
     "kiro:reset-health": "node scripts/reset-kiro-health.js",
     "kiro:auto-reset": "node scripts/auto-reset-kiro-health.js",
     "test": "jest",
