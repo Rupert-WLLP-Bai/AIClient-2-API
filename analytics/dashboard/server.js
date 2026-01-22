@@ -9,6 +9,7 @@ import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,10 +20,36 @@ const wss = new WebSocketServer({ server });
 
 // 数据库路径
 const DB_PATH = path.join(__dirname, '../../data/stats.db');
+const PROVIDER_POOLS_PATH = path.join(__dirname, '../../configs/provider_pools.json');
 
 // 获取数据库连接
 function getDb() {
     return new Database(DB_PATH, { readonly: true });
+}
+
+// Cache for provider pools to avoid repeated file reads
+let providerPoolsCache = null;
+let providerPoolsCacheTime = 0;
+const CACHE_TTL = 60000; // 1 minute cache
+
+function getProviderSequenceNumber(providerType, providerUuid) {
+    try {
+        // Refresh cache if expired
+        const now = Date.now();
+        if (!providerPoolsCache || (now - providerPoolsCacheTime) > CACHE_TTL) {
+            providerPoolsCache = JSON.parse(fs.readFileSync(PROVIDER_POOLS_PATH, 'utf8'));
+            providerPoolsCacheTime = now;
+        }
+
+        const pool = providerPoolsCache[providerType];
+        if (!pool) return null;
+
+        const index = pool.findIndex(p => p.uuid === providerUuid);
+        return index >= 0 ? index + 1 : null; // 1-based index for display
+    } catch (error) {
+        console.error('Error reading provider pools:', error);
+        return null;
+    }
 }
 
 // 静态文件服务
@@ -140,15 +167,29 @@ app.get('/api/stats/tokens/trend', (req, res) => {
         const db = getDb();
         const { startTime, endTime, granularity = 'hour' } = req.query;
 
-        const timeFormat = granularity === 'day'
-            ? '%Y-%m-%d'
-            : granularity === 'minute'
-            ? '%Y-%m-%d %H:%M'
-            : '%Y-%m-%d %H:00';
+        let timeFormat;
+        let bucketExpression;
+
+        if (granularity === 'day') {
+            timeFormat = '%Y-%m-%d';
+            bucketExpression = `strftime('${timeFormat}', timestamp)`;
+        } else if (granularity === 'hour') {
+            timeFormat = '%Y-%m-%d %H:00';
+            bucketExpression = `strftime('${timeFormat}', timestamp)`;
+        } else if (granularity === 'minute') {
+            timeFormat = '%Y-%m-%d %H:%M';
+            bucketExpression = `strftime('${timeFormat}', timestamp)`;
+        } else if (!isNaN(parseInt(granularity))) {
+            const minutes = parseInt(granularity);
+            bucketExpression = `strftime('%Y-%m-%d %H:', timestamp) || printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / ${minutes}) * ${minutes})`;
+        } else {
+            timeFormat = '%Y-%m-%d %H:00';
+            bucketExpression = `strftime('${timeFormat}', timestamp)`;
+        }
 
         let sql = `
             SELECT
-                strftime('${timeFormat}', timestamp) as time_bucket,
+                ${bucketExpression} as time_bucket,
                 SUM(input_tokens) as input_tokens,
                 SUM(output_tokens) as output_tokens,
                 SUM(estimated_cost) as cost,
@@ -316,9 +357,15 @@ app.get('/api/stats/recent', (req, res) => {
         const result = db.prepare(sql).all(params);
         db.close();
 
+        // Add provider sequence numbers
+        const enrichedResult = result.map(record => ({
+            ...record,
+            provider_sequence: getProviderSequenceNumber(record.provider_type, record.provider_uuid)
+        }));
+
         res.json({
             success: true,
-            data: result
+            data: enrichedResult
         });
     } catch (error) {
         console.error('Error getting recent requests:', error);

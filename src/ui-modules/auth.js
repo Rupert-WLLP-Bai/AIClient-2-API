@@ -87,7 +87,7 @@ function generateToken() {
  */
 function getExpiryTime() {
     const now = Date.now();
-    const expiry = 60 * 60 * 1000; // 1小时
+    const expiry = 24 * 60 * 60 * 1000; // 24小时
     return now + expiry;
 }
 
@@ -235,7 +235,7 @@ export async function handleLoginRequest(req, res) {
                 success: true,
                 message: 'Login successful',
                 token,
-                expiresIn: '1 hour'
+                expiresIn: '24 hours'
             }));
         } else {
             res.writeHead(401, { 'Content-Type': 'application/json' });

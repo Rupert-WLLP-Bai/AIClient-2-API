@@ -133,6 +133,7 @@
                 <div class="flex items-center gap-3 lg:gap-6">
                     <div class="time-filter flex items-center bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
                         <button data-range="1h" class="px-3 py-1 text-xs font-medium rounded-md transition-all active:scale-95">1h</button>
+                        <button data-range="today" class="px-3 py-1 text-xs font-medium rounded-md transition-all active:scale-95">Today</button>
                         <button data-range="24h" class="active px-3 py-1 text-xs font-medium rounded-md transition-all active:scale-95">24h</button>
                         <button data-range="7d" class="px-3 py-1 text-xs font-medium rounded-md transition-all active:scale-95">7d</button>
                         <button data-range="30d" class="px-3 py-1 text-xs font-medium rounded-md transition-all active:scale-95">30d</button>
@@ -450,6 +451,7 @@
                                     <tr>
                                         <th class="px-6 py-4">Time</th>
                                         <th class="px-6 py-4">Model</th>
+                                        <th class="px-6 py-4">Provider #</th>
                                         <th class="px-6 py-4">Status</th>
                                         <th class="px-6 py-4">Tokens</th>
                                         <th class="px-6 py-4">Latency</th>
@@ -518,7 +520,8 @@
                 </div>
 
                 <div class="space-y-2">
-                    <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">Provider UUID</p>
+                    <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">Provider</p>
+                    <p id="modal-provider-sequence" class="font-semibold text-lg"></p>
                     <p id="modal-provider-uuid" class="text-xs font-mono bg-slate-100 dark:bg-slate-800 p-2 rounded-lg break-all"></p>
                 </div>
 

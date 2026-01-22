@@ -113,6 +113,12 @@ function getTimeParams() {
         case '1h':
             startTime = new Date(now - 60 * 60 * 1000);
             break;
+        case 'today':
+            startTime = new Date(now);
+            startTime.setHours(0, 0, 0, 0);
+            endTime = new Date(now);
+            endTime.setHours(23, 59, 59, 999);
+            break;
         case '24h':
             startTime = new Date(now - 24 * 60 * 60 * 1000);
             break;
@@ -187,12 +193,34 @@ function initWebSocket() {
     };
 }
 
+let lastRefreshTime = 0;
+const REFRESH_THROTTLE = 5000;
+let refreshTimeout = null;
+
+function throttledLoadAllData() {
+    const now = Date.now();
+    if (now - lastRefreshTime >= REFRESH_THROTTLE) {
+        lastRefreshTime = now;
+        loadAllData();
+        if (refreshTimeout) {
+            clearTimeout(refreshTimeout);
+            refreshTimeout = null;
+        }
+    } else if (!refreshTimeout) {
+        refreshTimeout = setTimeout(() => {
+            lastRefreshTime = Date.now();
+            loadAllData();
+            refreshTimeout = null;
+        }, REFRESH_THROTTLE - (now - lastRefreshTime));
+    }
+}
+
 function handleWebSocketMessage(message) {
     if (message.event === 'realtime_stats') {
         updateRealtimeStats(message.data);
     }
     if (['request_complete', 'request_error', 'request_start'].includes(message.event)) {
-        loadAllData();
+        throttledLoadAllData();
     }
 }
 
@@ -246,7 +274,24 @@ function formatCost(cost) {
     return '$' + cost.toFixed(4);
 }
 
+function parseSQLiteDate(sqliteString) {
+    if (!sqliteString) return new Date();
+    // Handle formats: YYYY-MM-DD, YYYY-MM-DD HH:MM, YYYY-MM-DD HH:MM:SS
+    const parts = sqliteString.split(/[- :]/);
+    const year = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10) - 1;
+    const day = parseInt(parts[2], 10);
+    const hour = parts[3] ? parseInt(parts[3], 10) : 0;
+    const minute = parts[4] ? parseInt(parts[4], 10) : 0;
+    const second = parts[5] ? parseInt(parts[5], 10) : 0;
+    
+    // Create date as UTC
+    const date = new Date(Date.UTC(year, month, day, hour, minute, second));
+    return isNaN(date.getTime()) ? new Date() : date;
+}
+
 function formatTime(timestamp) {
+    // Handle ISO 8601 format (e.g., "2026-01-22T05:42:43.540Z") or SQLite format
     const date = new Date(timestamp);
     const utc8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000);
     return utc8Date.toISOString().slice(11, 19);
@@ -351,91 +396,105 @@ async function loadModelStats() {
     const ctx = document.getElementById('model-chart').getContext('2d');
     const isDark = document.documentElement.classList.contains('dark');
 
-    if (modelChart) modelChart.destroy();
-
     const colors = [
         '#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981',
         '#0ea5e9', '#f43f5e', '#06b6d4', '#84cc16', '#f97316'
     ];
 
-    const centerTextPlugin = {
-        id: 'centerText',
-        afterDraw: (chart) => {
-            if (chart.config.type !== 'doughnut') return;
-            const { ctx, chartArea: { top, bottom, left, right, width, height } } = chart;
-            ctx.save();
-            
-            const total = chart.config.data.datasets[0].data.reduce((a, b) => a + b, 0);
-            const centerX = left + width / 2;
-            const centerY = top + height / 2;
-            
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            
-            const isDark = document.documentElement.classList.contains('dark');
-            
-            ctx.font = 'bold 24px Inter';
-            ctx.fillStyle = isDark ? '#f1f5f9' : '#1e293b';
-            ctx.fillText(formatNumber(total), centerX, centerY - 8);
-            
-            ctx.font = '500 11px Inter';
-            ctx.fillStyle = isDark ? '#64748b' : '#94a3b8';
-            ctx.fillText('TOTAL REQUESTS', centerX, centerY + 16);
-            
-            ctx.restore();
-        }
-    };
+    const labels = data.map(d => d.model || 'Unknown');
+    const chartData = data.map(d => d.total_requests);
 
-
-    modelChart = new Chart(ctx, {
-        type: 'doughnut',
-        data: {
-            labels: data.map(d => d.model || 'Unknown'),
-            datasets: [{
-                data: data.map(d => d.total_requests),
-                backgroundColor: colors.slice(0, data.length),
-                borderWidth: 2,
-                borderColor: isDark ? '#1e293b' : '#ffffff',
-                hoverOffset: 12,
-                cutout: '75%',
-                borderRadius: 4
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    backgroundColor: isDark ? '#1e293b' : '#ffffff',
-                    titleColor: isDark ? '#f1f5f9' : '#1e293b',
-                    bodyColor: isDark ? '#9ca3af' : '#4b5563',
-                    borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
-                    borderWidth: 1,
-                    padding: 12,
-                    displayColors: true,
-                    boxPadding: 6,
-                    callbacks: {
-                        label: (context) => {
-                            const item = data[context.dataIndex];
-                            const reqPercent = ((item.total_requests / totalRequests) * 100).toFixed(1);
-                            const tokens = (item.total_input_tokens || 0) + (item.total_output_tokens || 0);
-                            const tokenPercent = ((tokens / totalTokens) * 100).toFixed(1);
-                            const costPercent = ((item.total_cost / totalCost) * 100).toFixed(1);
-
-                            return [
-                                ` Requests: ${formatNumber(item.total_requests)} (${reqPercent}%)`,
-                                ` Tokens: ${formatNumber(tokens)} (${tokenPercent}%)`,
-                                ` Cost: ${formatCost(item.total_cost)} (${costPercent}%)`
-                            ];
-                        }
-                    }
-                },
-                datalabels: { display: false }
+    if (modelChart) {
+        modelChart.data.labels = labels;
+        modelChart.data.datasets[0].data = chartData;
+        modelChart.data.datasets[0].backgroundColor = colors.slice(0, data.length);
+        modelChart.data.datasets[0].borderColor = isDark ? '#1e293b' : '#ffffff';
+        
+        modelChart.options.plugins.tooltip.backgroundColor = isDark ? '#1e293b' : '#ffffff';
+        modelChart.options.plugins.tooltip.titleColor = isDark ? '#f1f5f9' : '#1e293b';
+        modelChart.options.plugins.tooltip.bodyColor = isDark ? '#9ca3af' : '#4b5563';
+        modelChart.options.plugins.tooltip.borderColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+        
+        modelChart.update();
+    } else {
+        const centerTextPlugin = {
+            id: 'centerText',
+            afterDraw: (chart) => {
+                if (chart.config.type !== 'doughnut') return;
+                const { ctx, chartArea: { top, bottom, left, right, width, height } } = chart;
+                ctx.save();
+                
+                const total = chart.config.data.datasets[0].data.reduce((a, b) => a + b, 0);
+                const centerX = left + width / 2;
+                const centerY = top + height / 2;
+                
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                
+                const isDark = document.documentElement.classList.contains('dark');
+                
+                ctx.font = 'bold 24px Inter';
+                ctx.fillStyle = isDark ? '#f1f5f9' : '#1e293b';
+                ctx.fillText(formatNumber(total), centerX, centerY - 8);
+                
+                ctx.font = '500 11px Inter';
+                ctx.fillStyle = isDark ? '#64748b' : '#94a3b8';
+                ctx.fillText('TOTAL REQUESTS', centerX, centerY + 16);
+                
+                ctx.restore();
             }
-        },
-        plugins: [centerTextPlugin]
-    });
+        };
+
+        modelChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: labels,
+                datasets: [{
+                    data: chartData,
+                    backgroundColor: colors.slice(0, data.length),
+                    borderWidth: 2,
+                    borderColor: isDark ? '#1e293b' : '#ffffff',
+                    hoverOffset: 12,
+                    cutout: '75%',
+                    borderRadius: 4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: isDark ? '#1e293b' : '#ffffff',
+                        titleColor: isDark ? '#f1f5f9' : '#1e293b',
+                        bodyColor: isDark ? '#9ca3af' : '#4b5563',
+                        borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
+                        borderWidth: 1,
+                        padding: 12,
+                        displayColors: true,
+                        boxPadding: 6,
+                        callbacks: {
+                            label: (context) => {
+                                const item = data[context.dataIndex];
+                                const reqPercent = ((item.total_requests / totalRequests) * 100).toFixed(1);
+                                const tokens = (item.total_input_tokens || 0) + (item.total_output_tokens || 0);
+                                const tokenPercent = ((tokens / totalTokens) * 100).toFixed(1);
+                                const costPercent = ((item.total_cost / totalCost) * 100).toFixed(1);
+
+                                return [
+                                    ` Requests: ${formatNumber(item.total_requests)} (${reqPercent}%)`,
+                                    ` Tokens: ${formatNumber(tokens)} (${tokenPercent}%)`,
+                                    ` Cost: ${formatCost(item.total_cost)} (${costPercent}%)`
+                                ];
+                            }
+                        }
+                    },
+                    datalabels: { display: false }
+                }
+            },
+            plugins: [centerTextPlugin]
+        });
+    }
 
     const legendContainer = document.getElementById('model-legend');
     if (legendContainer) {
@@ -505,17 +564,27 @@ async function loadTokenTrend() {
     const timeParams = getTimeParams();
     let startTime = timeParams.startTime;
     let endTime = timeParams.endTime;
-    let granularity = 'minute';
+    let granularity = '1';
 
     if (!startTime) {
-        startTime = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+        startTime = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        granularity = '10';
     } else {
         const start = new Date(startTime);
         const end = endTime ? new Date(endTime) : new Date();
         const diffHours = (end - start) / (1000 * 60 * 60);
 
-        if (diffHours > 48) granularity = 'hour';
-        if (diffHours > 24 * 7) granularity = 'day';
+        if (diffHours <= 1.5) {
+            granularity = '1';
+        } else if (diffHours <= 24) {
+            granularity = '10';
+        } else if (diffHours <= 48) {
+            granularity = '30';
+        } else if (diffHours <= 24 * 7) {
+            granularity = 'hour';
+        } else {
+            granularity = 'day';
+        }
     }
 
     const params = new URLSearchParams({ startTime, granularity });
@@ -530,7 +599,7 @@ async function loadTokenTrend() {
     const isDark = document.documentElement.classList.contains('dark');
 
     const labels = data.map(d => {
-        const date = new Date(d.time_bucket.replace(' ', 'T') + 'Z');
+        const date = parseSQLiteDate(d.time_bucket);
         const utc8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000);
 
         if (granularity === 'day') return utc8Date.toISOString().slice(5, 10);
@@ -539,116 +608,186 @@ async function loadTokenTrend() {
     });
 
     const ctxInput = document.getElementById('token-input-chart').getContext('2d');
-    if (tokenInputChart) tokenInputChart.destroy();
+    const inputData = data.map(d => d.input_tokens || 0);
 
-    const gradientIn = ctxInput.createLinearGradient(0, 0, 0, 300);
-    gradientIn.addColorStop(0, 'rgba(99, 102, 241, 0.4)');
-    gradientIn.addColorStop(1, 'rgba(99, 102, 241, 0.0)');
+    if (tokenInputChart) {
+        tokenInputChart.data.labels = labels;
+        tokenInputChart.data.datasets[0].data = inputData;
+        tokenInputChart.options.plugins.tooltip.backgroundColor = isDark ? 'rgba(30, 41, 59, 0.9)' : 'rgba(255, 255, 255, 0.9)';
+        tokenInputChart.options.plugins.tooltip.titleColor = isDark ? '#f1f5f9' : '#1e293b';
+        tokenInputChart.options.plugins.tooltip.bodyColor = isDark ? '#cbd5e1' : '#475569';
+        tokenInputChart.options.plugins.tooltip.borderColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)';
+        
+        tokenInputChart.options.scales.x.ticks.color = isDark ? '#64748b' : '#94a3b8';
+        tokenInputChart.options.scales.y.ticks.color = isDark ? '#64748b' : '#94a3b8';
+        tokenInputChart.options.scales.y.grid.color = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+        
+        tokenInputChart.update();
+    } else {
+        const gradientIn = ctxInput.createLinearGradient(0, 0, 0, 300);
+        gradientIn.addColorStop(0, 'rgba(99, 102, 241, 0.4)');
+        gradientIn.addColorStop(1, 'rgba(99, 102, 241, 0.0)');
 
-    tokenInputChart = new Chart(ctxInput, {
-        type: 'line',
-        data: {
-            labels: labels,
-            datasets: [{
-                label: 'Input Tokens',
-                data: data.map(d => d.input_tokens || 0),
-                borderColor: '#6366f1',
-                backgroundColor: gradientIn,
-                fill: true,
-                tension: 0.4,
-                pointRadius: 0,
-                pointHoverRadius: 6,
-                pointHoverBackgroundColor: '#6366f1',
-                pointHoverBorderColor: '#fff',
-                pointHoverBorderWidth: 2,
-                borderWidth: 2
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            interaction: { intersect: false, mode: 'index' },
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    backgroundColor: isDark ? 'rgba(30, 41, 59, 0.9)' : 'rgba(255, 255, 255, 0.9)',
-                    titleColor: isDark ? '#f1f5f9' : '#1e293b',
-                    bodyColor: isDark ? '#cbd5e1' : '#475569',
-                    borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)',
-                    borderWidth: 1,
-                    padding: 10,
-                    cornerRadius: 8,
-                    displayColors: false,
-                    callbacks: {
-                        label: (context) => `Input: ${formatNumber(context.parsed.y)}`
+        tokenInputChart = new Chart(ctxInput, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Input Tokens',
+                    data: inputData,
+                    borderColor: '#6366f1',
+                    backgroundColor: gradientIn,
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 0,
+                    pointHoverRadius: 6,
+                    pointHoverBackgroundColor: '#6366f1',
+                    pointHoverBorderColor: '#fff',
+                    pointHoverBorderWidth: 2,
+                    borderWidth: 2,
+                    stepped: false
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { intersect: false, mode: 'index' },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: isDark ? 'rgba(30, 41, 59, 0.9)' : 'rgba(255, 255, 255, 0.9)',
+                        titleColor: isDark ? '#f1f5f9' : '#1e293b',
+                        bodyColor: isDark ? '#cbd5e1' : '#475569',
+                        borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)',
+                        borderWidth: 1,
+                        padding: 10,
+                        cornerRadius: 8,
+                        displayColors: false,
+                        callbacks: {
+                            label: (context) => `Input: ${formatNumber(context.parsed.y)}`
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: true,
+                        grid: { display: false },
+                        ticks: {
+                            color: isDark ? '#64748b' : '#94a3b8',
+                            font: { size: 10 },
+                            maxRotation: 0,
+                            autoSkip: true,
+                            maxTicksLimit: 6
+                        }
+                    },
+                    y: {
+                        display: true,
+                        min: 0,
+                        grid: {
+                            color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
+                            drawBorder: false
+                        },
+                        ticks: {
+                            color: isDark ? '#64748b' : '#94a3b8',
+                            font: { size: 10 },
+                            callback: (value) => formatNumber(value)
+                        }
                     }
                 }
-            },
-            scales: {
-                x: { display: false },
-                y: {
-                    display: false,
-                    min: 0
-                }
             }
-        }
-    });
+        });
+    }
 
     const ctxOutput = document.getElementById('token-output-chart').getContext('2d');
-    if (tokenOutputChart) tokenOutputChart.destroy();
+    const outputData = data.map(d => d.output_tokens || 0);
 
-    const gradientOut = ctxOutput.createLinearGradient(0, 0, 0, 300);
-    gradientOut.addColorStop(0, 'rgba(16, 185, 129, 0.4)');
-    gradientOut.addColorStop(1, 'rgba(16, 185, 129, 0.0)');
+    if (tokenOutputChart) {
+        tokenOutputChart.data.labels = labels;
+        tokenOutputChart.data.datasets[0].data = outputData;
+        tokenOutputChart.options.plugins.tooltip.backgroundColor = isDark ? 'rgba(30, 41, 59, 0.9)' : 'rgba(255, 255, 255, 0.9)';
+        tokenOutputChart.options.plugins.tooltip.titleColor = isDark ? '#f1f5f9' : '#1e293b';
+        tokenOutputChart.options.plugins.tooltip.bodyColor = isDark ? '#cbd5e1' : '#475569';
+        tokenOutputChart.options.plugins.tooltip.borderColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)';
+        
+        tokenOutputChart.options.scales.x.ticks.color = isDark ? '#64748b' : '#94a3b8';
+        tokenOutputChart.options.scales.y.ticks.color = isDark ? '#64748b' : '#94a3b8';
+        tokenOutputChart.options.scales.y.grid.color = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+        
+        tokenOutputChart.update();
+    } else {
+        const gradientOut = ctxOutput.createLinearGradient(0, 0, 0, 300);
+        gradientOut.addColorStop(0, 'rgba(16, 185, 129, 0.4)');
+        gradientOut.addColorStop(1, 'rgba(16, 185, 129, 0.0)');
 
-    tokenOutputChart = new Chart(ctxOutput, {
-        type: 'line',
-        data: {
-            labels: labels,
-            datasets: [{
-                label: 'Output Tokens',
-                data: data.map(d => d.output_tokens || 0),
-                borderColor: '#10b981',
-                backgroundColor: gradientOut,
-                fill: true,
-                tension: 0.4,
-                pointRadius: 0,
-                pointHoverRadius: 6,
-                pointHoverBackgroundColor: '#10b981',
-                pointHoverBorderColor: '#fff',
-                pointHoverBorderWidth: 2,
-                borderWidth: 2
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            interaction: { intersect: false, mode: 'index' },
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    backgroundColor: isDark ? 'rgba(30, 41, 59, 0.9)' : 'rgba(255, 255, 255, 0.9)',
-                    titleColor: isDark ? '#f1f5f9' : '#1e293b',
-                    bodyColor: isDark ? '#cbd5e1' : '#475569',
-                    borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)',
-                    borderWidth: 1,
-                    padding: 10,
-                    cornerRadius: 8,
-                    displayColors: false,
-                    callbacks: {
-                        label: (context) => `Output: ${formatNumber(context.parsed.y)}`
+        tokenOutputChart = new Chart(ctxOutput, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Output Tokens',
+                    data: outputData,
+                    borderColor: '#10b981',
+                    backgroundColor: gradientOut,
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 0,
+                    pointHoverRadius: 6,
+                    pointHoverBackgroundColor: '#10b981',
+                    pointHoverBorderColor: '#fff',
+                    pointHoverBorderWidth: 2,
+                    borderWidth: 2,
+                    stepped: false
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { intersect: false, mode: 'index' },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: isDark ? 'rgba(30, 41, 59, 0.9)' : 'rgba(255, 255, 255, 0.9)',
+                        titleColor: isDark ? '#f1f5f9' : '#1e293b',
+                        bodyColor: isDark ? '#cbd5e1' : '#475569',
+                        borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)',
+                        borderWidth: 1,
+                        padding: 10,
+                        cornerRadius: 8,
+                        displayColors: false,
+                        callbacks: {
+                            label: (context) => `Output: ${formatNumber(context.parsed.y)}`
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: true,
+                        grid: { display: false },
+                        ticks: {
+                            color: isDark ? '#64748b' : '#94a3b8',
+                            font: { size: 10 },
+                            maxRotation: 0,
+                            autoSkip: true,
+                            maxTicksLimit: 6
+                        }
+                    },
+                    y: {
+                        display: true,
+                        min: 0,
+                        grid: {
+                            color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
+                            drawBorder: false
+                        },
+                        ticks: {
+                            color: isDark ? '#64748b' : '#94a3b8',
+                            font: { size: 10 },
+                            callback: (value) => formatNumber(value)
+                        }
                     }
                 }
-            },
-            scales: {
-                x: { display: false },
-                y: {
-                    display: false,
-                    min: 0
-                }
             }
-        }
-    });
+        });
+    }
 }
 
 async function loadTokenDistribution() {
@@ -663,71 +802,87 @@ async function loadTokenDistribution() {
     const isDark = document.documentElement.classList.contains('dark');
 
     const ctx = document.getElementById('token-distribution-chart').getContext('2d');
-    if (tokenDistributionChart) tokenDistributionChart.destroy();
+    const labels = data.map(d => d.token_range);
+    const chartData = data.map(d => d.request_count);
 
-    const colors = [
-        '#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981',
-        '#06b6d4', '#3b82f6'
-    ];
+    if (tokenDistributionChart) {
+        tokenDistributionChart.data.labels = labels;
+        tokenDistributionChart.data.datasets[0].data = chartData;
+        tokenDistributionChart.options.plugins.tooltip.backgroundColor = isDark ? '#1e293b' : '#ffffff';
+        tokenDistributionChart.options.plugins.tooltip.titleColor = isDark ? '#f1f5f9' : '#1e293b';
+        tokenDistributionChart.options.plugins.tooltip.bodyColor = isDark ? '#9ca3af' : '#4b5563';
+        tokenDistributionChart.options.plugins.tooltip.borderColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+        
+        tokenDistributionChart.options.scales.x.ticks.color = isDark ? '#64748b' : '#94a3b8';
+        tokenDistributionChart.options.scales.y.ticks.color = isDark ? '#64748b' : '#94a3b8';
+        tokenDistributionChart.options.scales.y.grid.color = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+        
+        tokenDistributionChart.update();
+    } else {
+        const colors = [
+            '#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981',
+            '#06b6d4', '#3b82f6'
+        ];
 
-    tokenDistributionChart = new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: data.map(d => d.token_range),
-            datasets: [{
-                label: 'Requests',
-                data: data.map(d => d.request_count),
-                backgroundColor: colors,
-                borderRadius: 8,
-                barThickness: 40
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    display: false
-                },
-                tooltip: {
-                    backgroundColor: isDark ? '#1e293b' : '#ffffff',
-                    titleColor: isDark ? '#f1f5f9' : '#1e293b',
-                    bodyColor: isDark ? '#9ca3af' : '#4b5563',
-                    borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
-                    borderWidth: 1,
-                    padding: 12,
-                    callbacks: {
-                        label: (context) => {
-                            const total = data.reduce((sum, d) => sum + d.request_count, 0);
-                            const percent = ((context.parsed.y / total) * 100).toFixed(1);
-                            return ` Requests: ${formatNumber(context.parsed.y)} (${percent}%)`;
-                        }
-                    }
-                },
-                datalabels: {
-                    display: false
-                }
+        tokenDistributionChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Requests',
+                    data: chartData,
+                    backgroundColor: colors,
+                    borderRadius: 8,
+                    barThickness: 40
+                }]
             },
-            scales: {
-                x: {
-                    grid: { display: false },
-                    ticks: {
-                        color: isDark ? '#64748b' : '#94a3b8',
-                        font: { size: 11 }
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        backgroundColor: isDark ? '#1e293b' : '#ffffff',
+                        titleColor: isDark ? '#f1f5f9' : '#1e293b',
+                        bodyColor: isDark ? '#9ca3af' : '#4b5563',
+                        borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
+                        borderWidth: 1,
+                        padding: 12,
+                        callbacks: {
+                            label: (context) => {
+                                const total = data.reduce((sum, d) => sum + d.request_count, 0);
+                                const percent = ((context.parsed.y / total) * 100).toFixed(1);
+                                return ` Requests: ${formatNumber(context.parsed.y)} (${percent}%)`;
+                            }
+                        }
+                    },
+                    datalabels: {
+                        display: false
                     }
                 },
-                y: {
-                    grid: {
-                        color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)'
+                scales: {
+                    x: {
+                        grid: { display: false },
+                        ticks: {
+                            color: isDark ? '#64748b' : '#94a3b8',
+                            font: { size: 11 }
+                        }
                     },
-                    ticks: {
-                        color: isDark ? '#64748b' : '#94a3b8',
-                        callback: (value) => formatNumber(value)
+                    y: {
+                        grid: {
+                            color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)'
+                        },
+                        ticks: {
+                            color: isDark ? '#64748b' : '#94a3b8',
+                            callback: (value) => formatNumber(value)
+                        }
                     }
                 }
             }
-        }
-    });
+        });
+    }
 }
 
 async function loadTokenEfficiency() {
@@ -844,7 +999,7 @@ async function loadRecentRequests() {
     const tbody = document.getElementById('recent-table');
 
     if (recentData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="px-6 py-8 text-center text-slate-500">No requests found</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="px-6 py-8 text-center text-slate-500">No requests found</td></tr>';
         return;
     }
 
@@ -852,17 +1007,22 @@ async function loadRecentRequests() {
         const statusClass = item.status === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
             : item.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
             : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400';
-            
+
         const statusText = item.status === 'success' ? 'Success'
             : item.status === 'error' ? 'Failed'
             : 'Processing';
-            
+
         const iconName = item.status === 'success' ? 'check-circle' : item.status === 'error' ? 'x-circle' : 'loader';
 
         return `
             <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors cursor-pointer group" onclick="showRequestDetail(${index})">
                 <td class="px-6 py-4 text-slate-500 group-hover:text-primary-500 transition-colors">${formatTime(item.timestamp)}</td>
                 <td class="px-6 py-4 font-medium truncate max-w-[150px]" title="${item.model || '-'}">${item.model || '-'}</td>
+                <td class="px-6 py-4">
+                    <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300">
+                        ${item.provider_sequence ? `#${item.provider_sequence}` : 'N/A'}
+                    </span>
+                </td>
                 <td class="px-6 py-4">
                     <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium ${statusClass}">
                         <i data-lucide="${iconName}" class="w-3 h-3"></i>
@@ -887,11 +1047,16 @@ function showRequestDetail(index) {
     const statusBadge = document.getElementById('modal-status-badge');
     const errorContainer = document.getElementById('modal-error-container');
     
-    document.getElementById('modal-timestamp').textContent = new Date(item.timestamp).toLocaleString();
+    document.getElementById('modal-timestamp').textContent = parseSQLiteDate(item.timestamp).toLocaleString();
     document.getElementById('modal-model').textContent = item.model || '-';
     document.getElementById('modal-tokens').textContent = `${(item.input_tokens || 0) + (item.output_tokens || 0)} / ${item.input_tokens || 0} / ${item.output_tokens || 0}`;
     document.getElementById('modal-latency').textContent = item.response_time_ms ? item.response_time_ms + 'ms' : '-';
     document.getElementById('modal-provider-type').textContent = item.provider_type || '-';
+
+    // Format: "#5 (ea18a9be...)"
+    const shortUuid = item.provider_uuid ? item.provider_uuid.substring(0, 8) + '...' : '-';
+    const sequenceDisplay = item.provider_sequence ? `#${item.provider_sequence}` : 'N/A';
+    document.getElementById('modal-provider-sequence').textContent = `${sequenceDisplay} (${shortUuid})`;
     document.getElementById('modal-provider-uuid').textContent = item.provider_uuid || '-';
     
     const costContainer = document.getElementById('modal-cost-container');
