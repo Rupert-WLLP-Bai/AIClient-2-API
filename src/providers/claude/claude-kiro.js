@@ -1606,8 +1606,8 @@ async initializeAuth(forceRefresh = false) {
 
         const modelLower = model.toLowerCase();
 
-        // Check if model contains 'opus' or 'haiku' (case-insensitive)
-        if (modelLower.includes('opus') || modelLower.includes('haiku')) {
+        // Check if model contains 'opus' (case-insensitive)
+        if (modelLower.includes('opus')) {
             const redirectedModel = 'claude-sonnet-4-5';
             console.log(`[Kiro] Model redirected: ${model} → ${redirectedModel}`);
             return redirectedModel;

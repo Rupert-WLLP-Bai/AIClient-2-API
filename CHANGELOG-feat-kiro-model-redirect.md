@@ -6,7 +6,7 @@ Kiro 模型重定向功能 - 将 Opus 和 Haiku 模型重定向到 Sonnet-4-5，
 ## Key Features
 
 ### 1. 模型重定向
-- 将 claude-opus-4-5 和 claude-haiku-4-5 重定向到 claude-sonnet-4-5
+- 将 claude-opus-4-5 重定向到 claude-sonnet-4-5（Haiku 重定向已移除，见下文）
 - 在统计数据库中记录重定向后的模型名称
 
 ### 2. 健康监控系统
@@ -25,17 +25,21 @@ Kiro 模型重定向功能 - 将 Opus 和 Haiku 模型重定向到 Sonnet-4-5，
 - 支持使用统计、模型分布、Token 使用趋势等可视化
 - 暗色主题、日期选择器、详细日志模态框
 
-## Commits (20 total)
-- `d5a3202` fix(kiro): record redirected model name in stats database
-- `4c8211b` feat(analytics): add stats database error analysis script
-- `5832da0` feat(kiro): redirect opus and haiku models to sonnet-4-5
-- `0658a4a` feat(provider): add auto-reset monitoring for kiro health status
-- `9e55f34` feat(provider): add kiro health reset script and increase error threshold
-- `f7e2bfd` feat(analytics): beautify dashboard with modern charts and glassmorphism ui
-- ... (14 more commits related to dashboard improvements and log tracking)
+## Problems & Solutions
+
+### 1. 模型重定向逻辑调整
+- **Haiku 调整**: 移除了 `claude-haiku-4-5` 的本地重定向逻辑。
+  - **原因**: 本地环境需要配置：
+    ```json
+    "ANTHROPIC_MODEL": "claude-sonnet-4-5",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-4-5"
+    ```
+    如果强制将 `haiku` 重定向到 `sonnet`，会导致某些依赖特定模型配置的本地逻辑报错。
+- **Opus 保留**: 维持 `opus` 重定向到 `claude-sonnet-4-5` 的逻辑。
+  - **原因**: 主要是因为 Kiro 的 Free Plan 取消了对 Opus 的支持，本地暂时无法直接调用，需重定向到 Sonnet 4.5 以确保请求可用性。
 
 ## Modified Files
-- `src/providers/claude/claude-kiro.js` - Kiro 提供商逻辑
+- `src/providers/claude/claude-kiro.js` - Kiro 提供商逻辑（调整重定向过滤规则）
 - `src/handlers/request-handler.js` - 请求处理器
 - `src/services/stats-collector.js` - 统计收集服务 (新增)
 - `src/services/stats-database.js` - 统计数据库服务 (新增)
@@ -45,5 +49,5 @@ Kiro 模型重定向功能 - 将 Opus 和 Haiku 模型重定向到 Sonnet-4-5，
 - `analytics/dashboard/*` - 完整的 Dashboard 系统 (新增)
 
 ## Status
-- 领先 main 分支 20 个提交
+- 领先 main 分支 21 个提交
 - 未推送到 myfork
