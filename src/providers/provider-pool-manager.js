@@ -1505,20 +1505,49 @@ export class ProviderPoolManager {
                         // 根据不同的 provider 类型处理返回数据
                         if (providerType === 'claude-kiro-oauth') {
                             // Kiro 原始返回格式：{ usageBreakdownList: [...] }
-                            // 查找 AGENTIC_REQUEST 类型的用量
                             if (rawUsage.usageBreakdownList && Array.isArray(rawUsage.usageBreakdownList)) {
+                                // Kiro 返回多个资源类型：
+                                // 1. AGENTIC_REQUEST - 总用量（包含 Credit + 免费试用）
+                                // 2. CREDIT - 仅 Credit 部分
+                                // 3. 免费试用在 freeTrialInfo 中
+
+                                // 我们需要的是 AGENTIC_REQUEST 的总用量
                                 const agenticUsage = rawUsage.usageBreakdownList.find(
                                     item => item.resourceType === 'AGENTIC_REQUEST'
                                 );
 
                                 if (agenticUsage) {
+                                    // 使用 AGENTIC_REQUEST 的总用量
                                     config.quotaUsed = agenticUsage.currentUsageWithPrecision ?? agenticUsage.currentUsage ?? 0;
                                     config.quotaTotal = agenticUsage.usageLimitWithPrecision ?? agenticUsage.usageLimit ?? 550;
+
+                                    this._log('debug', `Extracted AGENTIC_REQUEST for ${config.uuid}: ${config.quotaUsed}/${config.quotaTotal}`);
                                 } else {
-                                    // 如果找不到 AGENTIC_REQUEST，使用第一个
-                                    const firstUsage = rawUsage.usageBreakdownList[0];
-                                    config.quotaUsed = firstUsage?.currentUsageWithPrecision ?? firstUsage?.currentUsage ?? 0;
-                                    config.quotaTotal = firstUsage?.usageLimitWithPrecision ?? firstUsage?.usageLimit ?? 550;
+                                    // 如果找不到 AGENTIC_REQUEST，尝试计算总用量
+                                    // 总用量 = Credit 用量 + 免费试用用量
+                                    let totalUsed = 0;
+                                    let totalLimit = 0;
+
+                                    for (const item of rawUsage.usageBreakdownList) {
+                                        const used = item.currentUsageWithPrecision ?? item.currentUsage ?? 0;
+                                        const limit = item.usageLimitWithPrecision ?? item.usageLimit ?? 0;
+
+                                        totalUsed += used;
+                                        totalLimit += limit;
+
+                                        // 如果有免费试用信息，也加上
+                                        if (item.freeTrialInfo) {
+                                            const trialUsed = item.freeTrialInfo.currentUsageWithPrecision ?? item.freeTrialInfo.currentUsage ?? 0;
+                                            const trialLimit = item.freeTrialInfo.usageLimitWithPrecision ?? item.freeTrialInfo.usageLimit ?? 0;
+                                            totalUsed += trialUsed;
+                                            totalLimit += trialLimit;
+                                        }
+                                    }
+
+                                    config.quotaUsed = totalUsed;
+                                    config.quotaTotal = totalLimit || 550;
+
+                                    this._log('warn', `AGENTIC_REQUEST not found for ${config.uuid}, calculated total: ${config.quotaUsed}/${config.quotaTotal}`);
                                 }
                             } else {
                                 throw new Error('Invalid Kiro usage data structure: missing usageBreakdownList');
