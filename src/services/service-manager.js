@@ -186,6 +186,14 @@ export async function initApiService(config, isReady = false) {
             providerPoolManager.checkAndRefreshExpiringNodes().catch(err => {
                 console.error(`[Initialization] Check and refresh expiring nodes failed: ${err.message}`);
             });
+
+            // 启动定时用量同步任务（随机间隔 1-2 小时）
+            if (config.ENABLE_QUOTA_SYNC !== false) {
+                console.log('[Initialization] Starting quota sync scheduler...');
+                providerPoolManager.startQuotaSyncScheduler();
+            } else {
+                console.log('[Initialization] Quota sync scheduler disabled by config');
+            }
         }
 
         // 健康检查将在服务器完全启动后执行

@@ -406,31 +406,52 @@ export class ProviderPoolManager {
     _calculateNodeScore(providerStatus) {
         const config = providerStatus.config;
         const now = Date.now();
-        
+
         // 1. 基础健康分：不健康的排最后
-        if (!config.isHealthy || config.isDisabled) return 1e16; 
-        
-        // 2. 预热/刷新分：2分钟内刷新过且使用次数极少的节点视为“新鲜”，分数极低（最高优）
-        const isFresh = config.lastHealthCheckTime && 
-                        (now - new Date(config.lastHealthCheckTime).getTime() < 120000) && 
+        if (!config.isHealthy || config.isDisabled) return 1e16;
+
+        // 2. 预热/刷新分：2分钟内刷新过且使用次数极少的节点视为"新鲜"，分数极低（最高优）
+        const isFresh = config.lastHealthCheckTime &&
+                        (now - new Date(config.lastHealthCheckTime).getTime() < 120000) &&
                         (config.usageCount === 0);
         if (isFresh) return -1e16;
 
-        // 3. 权重计算逻辑：
-        // 核心痛点：使用过一次的节点 lastUsed 变成巨大的毫秒时间戳，导致它永远比 lastUsed 为 null (0) 的节点分数高得多。
-        
-        // 改进思路：
-        // a) 统一量级：如果没用过，我们也给它一个相对于“现在”比较旧的时间戳，而不是 0。
-        // b) 或者：使用偏移量而非绝对时间戳。
-        
+        // 3. 基础分数计算（LRU策略）
         const lastUsedTime = config.lastUsed ? new Date(config.lastUsed).getTime() : (now - 3600000); // 没用过的视为 1 小时前用过
         const usageCount = config.usageCount || 0;
         const checkScore = config.lastHealthCheckTime ? new Date(config.lastHealthCheckTime).getTime() : 0;
 
-        // 分数计算（越小越优先）：
-        // 使用时间戳（升序 -> 越旧越优先） + 使用次数惩罚
+        // 4. 用量百分比惩罚（平滑指数曲线）
+        let quotaPenalty = 0;
+        if (config.quotaUsed !== undefined && config.quotaTotal !== undefined && config.quotaTotal > 0) {
+            const quotaPercentage = (config.quotaUsed / config.quotaTotal) * 100;
+
+            // 指数惩罚公式：penalty = base * e^(k * percentage)
+            // 参数说明：
+            // - base: 基础惩罚（毫秒）= 1分钟
+            // - k: 增长系数，控制曲线陡峭程度（0.03 为标准模式）
+            // - percentage: 用量百分比（0-100）
+            //
+            // 效果示例（k=0.03）：
+            // 0%   -> 1分钟惩罚    (100% 相对概率)
+            // 20%  -> 1.8分钟惩罚  (56% 相对概率)
+            // 40%  -> 3.3分钟惩罚  (30% 相对概率)
+            // 60%  -> 6分钟惩罚    (17% 相对概率)
+            // 80%  -> 11分钟惩罚   (9% 相对概率)
+            // 90%  -> 18分钟惩罚   (6% 相对概率)
+            // 95%  -> 25分钟惩罚   (4% 相对概率)
+
+            const base = 60000;  // 基础惩罚 1 分钟
+            const k = 0.03;      // 增长系数（可通过配置调整）
+
+            quotaPenalty = base * Math.exp(k * quotaPercentage);
+
+            this._log('debug', `Node ${config.uuid} quota: ${quotaPercentage.toFixed(1)}%, penalty: ${(quotaPenalty / 60000).toFixed(1)}min`);
+        }
+
+        // 5. 最终分数 = 时间分数 + 使用次数惩罚 + 用量惩罚
         // usageCount * 60000 表示每多用一次，相当于在时间排队上往后挪 1 分钟
-        return lastUsedTime + (usageCount * 60000) - (checkScore / 1e9);
+        return lastUsedTime + (usageCount * 60000) + quotaPenalty - (checkScore / 1e9);
     }
 
     /**
@@ -1429,6 +1450,189 @@ export class ProviderPoolManager {
             this._log('info', `configs/provider_pools.json updated successfully for types: ${typesToSave.join(', ')}`);
         } catch (error) {
             this._log('error', `Failed to write provider_pools.json: ${error.message}`);
+        }
+    }
+
+    /**
+     * 同步指定提供商类型的用量数据
+     * @param {string} providerType - 提供商类型（如 'claude-kiro-oauth'）
+     * @returns {Promise<Object>} 同步结果统计
+     */
+    async syncQuotaData(providerType) {
+        this._log('info', `Starting quota sync for provider type: ${providerType}`);
+
+        const providers = this.providerStatus[providerType] || [];
+        const stats = {
+            total: providers.length,
+            success: 0,
+            failed: 0,
+            skipped: 0,
+            errors: []
+        };
+
+        for (const providerStatus of providers) {
+            const config = providerStatus.config;
+
+            // 跳过不健康或禁用的节点
+            if (!config.isHealthy || config.isDisabled) {
+                stats.skipped++;
+                continue;
+            }
+
+            try {
+                // 动态导入 getServiceAdapter
+                const { getServiceAdapter } = await import('./adapter.js');
+
+                // 创建临时配置用于获取 adapter
+                const tempConfig = {
+                    ...this.globalConfig,
+                    ...config,
+                    MODEL_PROVIDER: providerType
+                };
+                delete tempConfig.providerPools; // 避免递归
+
+                // 获取服务适配器
+                const adapter = getServiceAdapter(tempConfig);
+
+                // 检查是否支持 getUsageLimits
+                if (adapter && typeof adapter.getUsageLimits === 'function') {
+                    this._log('debug', `Fetching quota for node ${config.uuid}...`);
+
+                    const usage = await adapter.getUsageLimits();
+
+                    // 更新用量数据
+                    if (usage && typeof usage === 'object') {
+                        // 根据不同的 provider 类型处理返回数据
+                        if (providerType === 'claude-kiro-oauth') {
+                            // Kiro 返回格式：{ used: number, total: number }
+                            config.quotaUsed = usage.used || 0;
+                            config.quotaTotal = usage.total || 550;
+                        } else if (providerType.startsWith('gemini-')) {
+                            // Gemini 可能有不同的格式，根据实际情况调整
+                            config.quotaUsed = usage.used || usage.usedTokens || 0;
+                            config.quotaTotal = usage.total || usage.totalTokens || 1000000;
+                        } else {
+                            // 通用格式
+                            config.quotaUsed = usage.used || 0;
+                            config.quotaTotal = usage.total || 0;
+                        }
+
+                        config.quotaLastUpdate = new Date().toISOString();
+
+                        const percentage = config.quotaTotal > 0
+                            ? ((config.quotaUsed / config.quotaTotal) * 100).toFixed(1)
+                            : 0;
+
+                        this._log('info', `Updated quota for ${config.uuid}: ${config.quotaUsed}/${config.quotaTotal} (${percentage}%)`);
+                        stats.success++;
+                    } else {
+                        throw new Error('Invalid usage data returned from API');
+                    }
+                } else {
+                    this._log('warn', `Node ${config.uuid} does not support getUsageLimits`);
+                    stats.skipped++;
+                }
+            } catch (error) {
+                this._log('error', `Failed to sync quota for node ${config.uuid}: ${error.message}`);
+                stats.failed++;
+                stats.errors.push({
+                    uuid: config.uuid,
+                    error: error.message
+      });
+            }
+        }
+
+        // 保存更新后的数据
+        if (stats.success > 0) {
+            this._debouncedSave(providerType);
+        }
+
+        this._log('info', `Quota sync completed for ${providerType}: ${stats.success} success, ${stats.failed} failed, ${stats.skipped} skipped`);
+
+        return stats;
+    }
+
+    /**
+     * 同步所有支持的提供商类型的用量数据
+     * @returns {Promise<Object>} 所有提供商的同步结果
+     */
+    async syncAllQuotaData() {
+        this._log('info', 'Starting quota sync for all providers...');
+
+        const supportedProviders = ['claude-kiro-oauth', 'gemini-cli-oauth', 'gemini-antigravity'];
+        const results = {};
+
+        for (const providerType of supportedProviders) {
+            if (this.providerStatus[providerType] && this.providerStatus[providerType].length > 0) {
+                try {
+                    results[providerType] = await this.syncQuotaData(providerType);
+                } catch (error) {
+                    this._log('error', `Failed to sync quota for ${providerType}: ${error.message}`);
+                    results[providerType] = {
+                        total: 0,
+                        success: 0,
+                        failed: 0,
+                        skipped: 0,
+                        errors: [{ error: error.message }]
+                    };
+                }
+            }
+        }
+
+        this._log('info', 'Quota sync completed for all providers');
+        return results;
+    }
+
+    /**
+     * 启动定时用量同步任务（随机间隔 1-2 小时）
+     */
+    startQuotaSyncScheduler() {
+        // 如果已经有定时器在运行，先清除
+        if (this.quotaSyncTimer) {
+            clearTimeout(this.quotaSyncTimer);
+        }
+
+        const scheduleNextSync = () => {
+            // 生成 1-2 小时之间的随机间隔（毫秒）
+            const minInterval = 60 * 60 * 1000;  // 1 小时
+            const maxInterval = 120 * 60 * 1000; // 2 小时
+            const randomInterval = minInterval + Math.random() * (maxInterval - minInterval);
+
+            const nextSyncTime = new Date(Date.now() + randomInterval);
+            this._log('info', `Next quota sync scheduled at: ${nextSyncTime.toISOString()} (in ${(randomInterval / 60000).toFixed(1)} minutes)`);
+
+            this.quotaSyncTimer = setTimeout(async () => {
+                try {
+                    await this.syncAllQuotaData();
+                } catch (error) {
+                    this._log('error', `Scheduled quota sync failed: ${error.message}`);
+                } finally {
+                    // 同步完成后，安排下一次同步
+                    scheduleNextSync();
+                }
+            }, randomInterval);
+        };
+
+        // 启动时立即执行一次同步
+        this._log('info', 'Starting quota sync scheduler...');
+        this.syncAllQuotaData().then(() => {
+            // 首次同步完成后，安排下一次同步
+            scheduleNextSync();
+        }).catch(error => {
+            this._log('error', `Initial quota sync failed: ${error.message}`);
+            // 即使失败也要安排下一次同步
+            scheduleNextSync();
+        });
+    }
+
+    /**
+     * 停止定时用量同步任务
+     */
+    stopQuotaSyncScheduler() {
+        if (this.quotaSyncTimer) {
+            clearTimeout(this.quotaSyncTimer);
+            this.quotaSyncTimer = null;
+            this._log('info', 'Quota sync scheduler stopped');
         }
     }
 

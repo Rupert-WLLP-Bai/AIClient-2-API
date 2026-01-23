@@ -1019,9 +1019,18 @@ async function loadRecentRequests() {
                 <td class="px-6 py-4 text-slate-500 group-hover:text-primary-500 transition-colors">${formatTime(item.timestamp)}</td>
                 <td class="px-6 py-4 font-medium truncate max-w-[150px]" title="${item.model || '-'}">${item.model || '-'}</td>
                 <td class="px-6 py-4">
-                    <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300">
-                        ${item.provider_sequence ? `#${item.provider_sequence}` : 'N/A'}
-                    </span>
+                    ${(() => {
+                        const isOrchids = item.provider_type && item.provider_type.includes('orchids');
+                        const bgColor = isOrchids ? 'bg-blue-100 dark:bg-blue-900/30' : 'bg-purple-100 dark:bg-purple-900/30';
+                        const textColor = isOrchids ? 'text-blue-700 dark:text-blue-300' : 'text-purple-700 dark:text-purple-300';
+                        const providerLabel = isOrchids ? 'Orchids' : 'Kiro';
+                        const sequence = item.provider_sequence ? `#${item.provider_sequence}` : 'N/A';
+                        return `<span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium ${bgColor} ${textColor}">
+                            <span class="font-semibold">${providerLabel}</span>
+                            <span class="opacity-75">·</span>
+                            <span>${sequence}</span>
+                        </span>`;
+                    })()}
                 </td>
                 <td class="px-6 py-4">
                     <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium ${statusClass}">
