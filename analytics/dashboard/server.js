@@ -229,33 +229,50 @@ app.get('/api/stats/tokens/trend', (req, res) => {
 app.get('/api/stats/providers', (req, res) => {
     try {
         const db = getDb();
-        const { providerType, limit = 50 } = req.query;
+        const { providerType, limit = 50, startTime, endTime } = req.query;
 
+        // Build WHERE clause for time filtering
+        let whereClause = 'WHERE 1=1';
+        const params = {};
+
+        if (startTime) {
+            whereClause += ` AND timestamp >= @startTime`;
+            params.startTime = startTime;
+        }
+        if (endTime) {
+            whereClause += ` AND timestamp <= @endTime`;
+            params.endTime = endTime;
+        }
+        if (providerType) {
+            whereClause += ` AND provider_type = @providerType`;
+            params.providerType = providerType;
+        }
+
+        // Query from request_logs and aggregate by provider
         let sql = `
             SELECT
                 provider_type,
                 provider_uuid,
                 provider_custom_name,
-                total_requests,
-                total_success,
-                total_errors,
-                total_tokens,
-                total_cost,
-                is_healthy,
-                last_error_time,
-                last_success_time,
-                ROUND(total_success * 100.0 / NULLIF(total_requests, 0), 2) as success_rate
-            FROM provider_usage_ranking
-            WHERE 1=1
+                COUNT(*) as total_requests,
+                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as total_success,
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as total_errors,
+                SUM(input_tokens + output_tokens) as total_tokens,
+                SUM(estimated_cost) as total_cost,
+                MAX(CASE WHEN status = 'error' THEN timestamp END) as last_error_time,
+                MAX(CASE WHEN status = 'success' THEN timestamp END) as last_success_time,
+                ROUND(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) as success_rate,
+                CASE
+                    WHEN ROUND(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) >= 95 THEN 1
+                    ELSE 0
+                END as is_healthy
+            FROM request_logs
+            ${whereClause}
+            GROUP BY provider_type, provider_uuid, provider_custom_name
+            ORDER BY total_requests DESC
+            LIMIT @limit
         `;
 
-        const params = {};
-        if (providerType) {
-            sql += ` AND provider_type = @providerType`;
-            params.providerType = providerType;
-        }
-
-        sql += ` ORDER BY total_requests DESC LIMIT @limit`;
         params.limit = parseInt(limit);
 
         const result = db.prepare(sql).all(params);

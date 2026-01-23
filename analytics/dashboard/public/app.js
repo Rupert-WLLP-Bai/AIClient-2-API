@@ -366,7 +366,7 @@ async function loadTokenAnalytics() {
     // Input/Output ratio
     const ratioEl = document.getElementById('token-ratio');
     const inputRatio = Math.round(data.input_ratio || 0);
-    const outputRatio = Math.round(data.output_ratio || 0);
+    const outputRatio = 100 - inputRatio; // Ensure they sum to 100%
     ratioEl.textContent = `${inputRatio}% / ${outputRatio}%`;
     ratioEl.classList.remove('skeleton', 'w-24', 'h-8');
 
@@ -852,8 +852,20 @@ async function loadTokenDistribution() {
                         padding: 12,
                         callbacks: {
                             label: (context) => {
-                                const total = data.reduce((sum, d) => sum + d.request_count, 0);
-                                const percent = ((context.parsed.y / total) * 100).toFixed(1);
+                                // Use current chart data, not the captured 'data' variable
+                                const currentData = context.chart.data.datasets[0].data;
+                                const total = currentData.reduce((sum, val) => sum + val, 0);
+
+                                // Calculate all percentages and round them
+                                const percentages = currentData.map(val =>
+                                    parseFloat(((val / total) * 100).toFixed(1))
+                                );
+
+                                // Adjust the last percentage to ensure sum is exactly 100%
+                                const sum = percentages.slice(0, -1).reduce((a, b) => a + b, 0);
+                                percentages[percentages.length - 1] = parseFloat((100 - sum).toFixed(1));
+
+                                const percent = percentages[context.dataIndex];
                                 return ` Requests: ${formatNumber(context.parsed.y)} (${percent}%)`;
                             }
                         }

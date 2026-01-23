@@ -421,37 +421,47 @@ export class ProviderPoolManager {
         const usageCount = config.usageCount || 0;
         const checkScore = config.lastHealthCheckTime ? new Date(config.lastHealthCheckTime).getTime() : 0;
 
-        // 4. 用量百分比惩罚（平滑指数曲线）
-        let quotaPenalty = 0;
+        // 4. 配额奖励（剩余配额越多，分数越低，优先级越高）
+        let quotaBonus = 0;
         if (config.quotaUsed !== undefined && config.quotaTotal !== undefined && config.quotaTotal > 0) {
-            const quotaPercentage = (config.quotaUsed / config.quotaTotal) * 100;
+            const quotaPercentageUsed = (config.quotaUsed / config.quotaTotal) * 100;
 
-            // 指数惩罚公式：penalty = base * e^(k * percentage)
+            // 如果使用率超过 90%，视为"几乎耗尽"，分数设为极高（低优先级）
+            if (quotaPercentageUsed >= 90) {
+                this._log('warn', `Node ${config.uuid} quota almost exhausted (${quotaPercentageUsed.toFixed(1)}%), deprioritizing`);
+                return 1e15;  // 比不健康节点稍好，但优先级极低
+            }
+
+            const quotaRemaining = config.quotaTotal - config.quotaUsed;
+            const quotaPercentageRemaining = (quotaRemaining / config.quotaTotal) * 100;
+
+            // 指数奖励公式：bonus = base * e^(k * remainingPercentage)
+            // 剩余配额越多，bonus 越大，从分数中减去（降低分数，提高优先级）
+            //
             // 参数说明：
-            // - base: 基础惩罚（毫秒）= 1分钟
-            // - k: 增长系数，控制曲线陡峭程度（0.03 为标准模式）
-            // - percentage: 用量百分比（0-100）
+            // - base: 基础奖励（毫秒）= 5 分钟（降低以保留 LRU 效果）
+            // - k: 增长系数，控制曲线陡峭程度（0.03）
+            // - remainingPercentage: 剩余配额百分比（0-100）
             //
             // 效果示例（k=0.03）：
-            // 0%   -> 1分钟惩罚    (100% 相对概率)
-            // 20%  -> 1.8分钟惩罚  (56% 相对概率)
-            // 40%  -> 3.3分钟惩罚  (30% 相对概率)
-            // 60%  -> 6分钟惩罚    (17% 相对概率)
-            // 80%  -> 11分钟惩罚   (9% 相对概率)
-            // 90%  -> 18分钟惩罚   (6% 相对概率)
-            // 95%  -> 25分钟惩罚   (4% 相对概率)
+            // 90% 剩余 -> 75 分钟奖励  (优先级高)
+            // 70% 剩余 -> 24 分钟奖励  (优先级中高)
+            // 50% 剩余 -> 11 分钟奖励  (优先级中)
+            // 30% 剩余 -> 6 分钟奖励   (优先级低)
+            // 10% 剩余 -> 5 分钟奖励   (优先级极低)
 
-            const base = 60000;  // 基础惩罚 1 分钟
-            const k = 0.03;      // 增长系数（可通过配置调整）
+            const base = 300000;  // 5 分钟（毫秒）
+            const k = 0.03;       // 增长系数
 
-            quotaPenalty = base * Math.exp(k * quotaPercentage);
+            quotaBonus = base * Math.exp(k * quotaPercentageRemaining);
 
-            this._log('debug', `Node ${config.uuid} quota: ${quotaPercentage.toFixed(1)}%, penalty: ${(quotaPenalty / 60000).toFixed(1)}min`);
+            this._log('debug', `Node ${config.uuid} quota remaining: ${quotaPercentageRemaining.toFixed(1)}%, bonus: ${(quotaBonus / 60000).toFixed(1)}min`);
         }
 
-        // 5. 最终分数 = 时间分数 + 使用次数惩罚 + 用量惩罚
+        // 5. 最终分数 = 时间分数 + 使用次数惩罚 - 配额奖励
+        // 剩余配额多的账号会得到大额奖励（减分），优先被选中
         // usageCount * 60000 表示每多用一次，相当于在时间排队上往后挪 1 分钟
-        return lastUsedTime + (usageCount * 60000) + quotaPenalty - (checkScore / 1e9);
+        return lastUsedTime + (usageCount * 60000) - quotaBonus - (checkScore / 1e9);
     }
 
     /**
@@ -561,6 +571,35 @@ export class ProviderPoolManager {
     }
 
     /**
+     * 计算账号权重（用于加权随机选择）
+     * @private
+     */
+    _calculateWeight(config) {
+        // 1. 剩余配额因子（核心）
+        const remainingRatio = config.quotaTotal > 0
+            ? (config.quotaTotal - config.quotaUsed) / config.quotaTotal
+            : 0;
+
+        // 2. 风险惩罚因子
+        const quotaPercentageUsed = (config.quotaUsed / config.quotaTotal) * 100;
+        let riskFactor = 1.0;
+        if (quotaPercentageUsed >= 90) {
+            riskFactor = 0.1;  // 极高危
+        } else if (quotaPercentageUsed >= 80) {
+            riskFactor = 0.3;  // 高危
+        } else if (quotaPercentageUsed >= 60) {
+            riskFactor = 0.7;  // 中
+        } else if (quotaPercentageUsed >= 40) {
+            riskFactor = 1.0;  // 低
+        } else {
+            riskFactor = 1.2;  // 储备
+        }
+
+        // 最终权重 = 剩余配额 × 风险因子
+        return remainingRatio * riskFactor;
+    }
+
+    /**
      * 实际执行 provider 选择的内部方法（同步执行，由锁保护）
      * @private
      */
@@ -599,23 +638,52 @@ export class ProviderPoolManager {
             return null;
         }
 
-        // 改进：使用统一的评分策略进行选择
-        const selected = availableAndHealthyProviders.sort((a, b) => {
-            return this._calculateNodeScore(a) - this._calculateNodeScore(b);
-        })[0];
+        // 改进：先按权重排序选出 top 5，然后加权随机选择
+        // 1. 计算所有账号的权重
+        const providersWithWeight = availableAndHealthyProviders.map(p => ({
+            provider: p,
+            weight: this._calculateWeight(p.config)
+        }));
+
+        // 2. 按权重排序，取前 5 个高权重账号
+        const sortedByWeight = providersWithWeight.sort((a, b) => b.weight - a.weight);
+        const topCount = Math.min(5, sortedByWeight.length);
+        const topProviders = sortedByWeight.slice(0, topCount);
+
+        // 3. 在 top 5 中加权随机选择
+        const totalWeight = topProviders.reduce((sum, p) => sum + p.weight, 0);
+        let random = Math.random() * totalWeight;
+
+        let selected = topProviders[0];
+        for (const p of topProviders) {
+            random -= p.weight;
+            if (random <= 0) {
+                selected = p;
+                break;
+            }
+        }
+
+        const selectedProvider = selected.provider;
+        const selectedWeight = selected.weight;
+
+        // 输出到主日志
+        const remainingPercentage = ((selectedProvider.config.quotaTotal - selectedProvider.config.quotaUsed) / selectedProvider.config.quotaTotal * 100).toFixed(1);
+        console.log(`[Load Balancer] Selected from top ${topCount}: ${selectedProvider.config.uuid} (weight: ${selectedWeight.toFixed(3)}, remaining: ${remainingPercentage}%)`);
+
+        this._log('debug', `Top ${topCount} providers by weight, selected: ${selectedProvider.config.uuid} (weight: ${selectedWeight.toFixed(3)}, remaining: ${remainingPercentage}%)`);
 
         // 始终更新 lastUsed（确保 LRU 策略生效，避免并发请求选到同一个 provider）
         // usageCount 只在请求成功后才增加（由 skipUsageCount 控制）
-        selected.config.lastUsed = new Date().toISOString();
+        selectedProvider.config.lastUsed = new Date().toISOString();
         if (!options.skipUsageCount) {
-            selected.config.usageCount++;
+            selectedProvider.config.usageCount++;
         }
         // 使用防抖保存（文件 I/O 是异步的，但内存已经更新）
         this._debouncedSave(providerType);
 
-        this._log('debug', `Selected provider for ${providerType} (LRU): ${selected.config.uuid}${requestedModel ? ` for model: ${requestedModel}` : ''}${options.skipUsageCount ? ' (skip usage count)' : ''}`);
-        
-        return selected.config;
+        this._log('debug', `Selected provider for ${providerType} (weighted random): ${selectedProvider.config.uuid}${requestedModel ? ` for model: ${requestedModel}` : ''}${options.skipUsageCount ? ' (skip usage count)' : ''}`);
+
+        return selectedProvider.config;
     }
 
     /**

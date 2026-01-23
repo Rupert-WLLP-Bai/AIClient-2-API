@@ -27,3 +27,5 @@ data
 # 测试脚本
 test_*.py
 decode_jwt.py
+
+docs/
