@@ -1498,23 +1498,39 @@ export class ProviderPoolManager {
                 if (adapter && typeof adapter.getUsageLimits === 'function') {
                     this._log('debug', `Fetching quota for node ${config.uuid}...`);
 
-                    const usage = await adapter.getUsageLimits();
+                    const rawUsage = await adapter.getUsageLimits();
 
                     // 更新用量数据
-                    if (usage && typeof usage === 'object') {
+                    if (rawUsage && typeof rawUsage === 'object') {
                         // 根据不同的 provider 类型处理返回数据
                         if (providerType === 'claude-kiro-oauth') {
-                            // Kiro 返回格式：{ used: number, total: number }
-                            config.quotaUsed = usage.used || 0;
-                            config.quotaTotal = usage.total || 550;
+                            // Kiro 原始返回格式：{ usageBreakdownList: [...] }
+                            // 查找 AGENTIC_REQUEST 类型的用量
+                            if (rawUsage.usageBreakdownList && Array.isArray(rawUsage.usageBreakdownList)) {
+                                const agenticUsage = rawUsage.usageBreakdownList.find(
+                                    item => item.resourceType === 'AGENTIC_REQUEST'
+                                );
+
+                                if (agenticUsage) {
+                                    config.quotaUsed = agenticUsage.currentUsageWithPrecision ?? agenticUsage.currentUsage ?? 0;
+                                    config.quotaTotal = agenticUsage.usageLimitWithPrecision ?? agenticUsage.usageLimit ?? 550;
+                                } else {
+                                    // 如果找不到 AGENTIC_REQUEST，使用第一个
+                                    const firstUsage = rawUsage.usageBreakdownList[0];
+                                    config.quotaUsed = firstUsage?.currentUsageWithPrecision ?? firstUsage?.currentUsage ?? 0;
+                                    config.quotaTotal = firstUsage?.usageLimitWithPrecision ?? firstUsage?.usageLimit ?? 550;
+                                }
+                            } else {
+                                throw new Error('Invalid Kiro usage data structure: missing usageBreakdownList');
+                            }
                         } else if (providerType.startsWith('gemini-')) {
                             // Gemini 可能有不同的格式，根据实际情况调整
-                            config.quotaUsed = usage.used || usage.usedTokens || 0;
-                            config.quotaTotal = usage.total || usage.totalTokens || 1000000;
+                            config.quotaUsed = rawUsage.used || rawUsage.usedTokens || 0;
+                            config.quotaTotal = rawUsage.total || rawUsage.totalTokens || 1000000;
                         } else {
                             // 通用格式
-                            config.quotaUsed = usage.used || 0;
-                            config.quotaTotal = usage.total || 0;
+                            config.quotaUsed = rawUsage.used || 0;
+                            config.quotaTotal = rawUsage.total || 0;
                         }
 
                         config.quotaLastUpdate = new Date().toISOString();
