@@ -4,6 +4,7 @@ import { getServiceAdapter } from './adapter.js';
 import { MODEL_PROVIDER, getProtocolPrefix } from '../utils/common.js';
 import { getProviderModels } from './provider-models.js';
 import axios from 'axios';
+import { getStatsDatabase } from '../services/stats-database.js';
 
 /**
  * Manages a pool of API service providers, handling their health and selection.
@@ -575,28 +576,56 @@ export class ProviderPoolManager {
      * @private
      */
     _calculateWeight(config) {
-        // 1. 剩余配额因子（核心）
-        const remainingRatio = config.quotaTotal > 0
-            ? (config.quotaTotal - config.quotaUsed) / config.quotaTotal
-            : 0;
+        // 新策略：基于剩余额度的线性权重 + 老号优先微调
+        // 目标：让所有账号均匀消耗，在大致相同时间达到上限
+        // 同时给老号（已使用较多的）稍微提高概率，避免过期浪费
 
-        // 2. 风险惩罚因子
-        const quotaPercentageUsed = (config.quotaUsed / config.quotaTotal) * 100;
-        let riskFactor = 1.0;
-        if (quotaPercentageUsed >= 90) {
-            riskFactor = 0.1;  // 极高危
-        } else if (quotaPercentageUsed >= 80) {
-            riskFactor = 0.3;  // 高危
-        } else if (quotaPercentageUsed >= 60) {
-            riskFactor = 0.7;  // 中
-        } else if (quotaPercentageUsed >= 40) {
-            riskFactor = 1.0;  // 低
-        } else {
-            riskFactor = 1.2;  // 储备
+        const remainingQuota = config.quotaTotal - config.quotaUsed;
+
+        // 如果剩余额度为负或为0，给一个极小的权重避免被选中
+        if (remainingQuota <= 0) {
+            return 0.001;
         }
 
-        // 最终权重 = 剩余配额 × 风险因子
-        return remainingRatio * riskFactor;
+        // 1. 基础权重：剩余额度（保证均匀消耗）
+        let weight = remainingQuota;
+
+        // 2. 老号加成：已使用额度越多，给予小幅加成
+        // 使用率越高的账号，加成越多（但加成幅度不大，避免破坏均匀性）
+        const usageRatio = config.quotaUsed / config.quotaTotal;
+        const oldAccountBonus = usageRatio * 50; // 最多加 50 的权重（约占剩余额度的 10%）
+
+        weight += oldAccountBonus;
+
+        return weight;
+    }
+
+    /**
+     * 动态选择 Top N 账号
+     * @private
+     * @param {Array} accounts - 账号数组(已排序)
+     * @param {number} threshold - 权重阈值(相对于最高权重的比例)
+     * @param {number} minN - 最少候选数
+     * @param {number} maxN - 最多候选数
+     * @returns {Array} 选中的账号数组
+     */
+    _selectDynamicTopN(accounts, threshold, minN, maxN) {
+        if (accounts.length === 0) return [];
+
+        const maxWeight = accounts[0].weight;
+        const minWeight = maxWeight * threshold;
+
+        // 选择权重 >= minWeight 的账号
+        let topN = accounts.filter(a => a.weight >= minWeight);
+
+        // 确保至少有 minN 个，最多有 maxN 个
+        if (topN.length < minN) {
+            topN = accounts.slice(0, Math.min(minN, accounts.length));
+        } else if (topN.length > maxN) {
+            topN = topN.slice(0, maxN);
+        }
+
+        return topN;
     }
 
     /**
@@ -638,24 +667,54 @@ export class ProviderPoolManager {
             return null;
         }
 
-        // 改进：先按权重排序选出 top 5，然后加权随机选择
-        // 1. 计算所有账号的权重
-        const providersWithWeight = availableAndHealthyProviders.map(p => ({
-            provider: p,
-            weight: this._calculateWeight(p.config)
-        }));
+        // 分层加权随机选择：新号层 + 老号层
+        // 1. 计算所有账号的权重和使用率，并分层
+        const providersWithWeight = availableAndHealthyProviders.map(p => {
+            const usageRatio = p.config.quotaUsed / p.config.quotaTotal;
+            return {
+                provider: p,
+                weight: this._calculateWeight(p.config),
+                usageRatio: usageRatio,
+                tier: usageRatio < 0.4 ? 'new' : 'old'  // 新号 vs 老号
+            };
+        });
 
-        // 2. 按权重排序，取前 5 个高权重账号
-        const sortedByWeight = providersWithWeight.sort((a, b) => b.weight - a.weight);
-        const topCount = Math.min(5, sortedByWeight.length);
-        const topProviders = sortedByWeight.slice(0, topCount);
+        // 2. 分别对每层排序
+        const newAccounts = providersWithWeight
+            .filter(p => p.tier === 'new')
+            .sort((a, b) => b.weight - a.weight);
 
-        // 3. 在 top 5 中加权随机选择
-        const totalWeight = topProviders.reduce((sum, p) => sum + p.weight, 0);
+        const oldAccounts = providersWithWeight
+            .filter(p => p.tier === 'old')
+            .sort((a, b) => b.weight - a.weight);
+
+        // 3. 动态选择 Top N
+        // 新号层：选择权重 >= 最高权重 * 0.7 的账号（至少 3 个，最多 8 个）
+        const newTopN = this._selectDynamicTopN(newAccounts, 0.7, 3, 8);
+
+        // 老号层：选择权重 >= 最高权重 * 0.6 的账号（至少 2 个，最多 5 个）
+        const oldTopN = this._selectDynamicTopN(oldAccounts, 0.6, 2, 5);
+
+        // 4. 按概率选择层级
+        // 70% 概率从新号层选择，30% 概率从老号层选择
+        const useNewTier = Math.random() < 0.7;
+        const selectedTier = useNewTier ? newTopN : oldTopN;
+
+        // 如果选中的层级为空，使用另一层
+        const candidatePool = selectedTier.length > 0 ? selectedTier :
+                             (useNewTier ? oldTopN : newTopN);
+
+        if (candidatePool.length === 0) {
+            this._log('warn', `No available providers for type: ${providerType}`);
+            return null;
+        }
+
+        // 5. 在候选池中加权随机选择
+        const totalWeight = candidatePool.reduce((sum, p) => sum + p.weight, 0);
         let random = Math.random() * totalWeight;
 
-        let selected = topProviders[0];
-        for (const p of topProviders) {
+        let selected = candidatePool[0];
+        for (const p of candidatePool) {
             random -= p.weight;
             if (random <= 0) {
                 selected = p;
@@ -665,12 +724,14 @@ export class ProviderPoolManager {
 
         const selectedProvider = selected.provider;
         const selectedWeight = selected.weight;
+        const selectedTierName = selected.tier;
 
         // 输出到主日志
         const remainingPercentage = ((selectedProvider.config.quotaTotal - selectedProvider.config.quotaUsed) / selectedProvider.config.quotaTotal * 100).toFixed(1);
-        console.log(`[Load Balancer] Selected from top ${topCount}: ${selectedProvider.config.uuid} (weight: ${selectedWeight.toFixed(3)}, remaining: ${remainingPercentage}%)`);
+        const usagePercentage = (selected.usageRatio * 100).toFixed(1);
+        console.log(`[Load Balancer] Selected from ${selectedTierName} tier (pool: ${candidatePool.length}, new: ${newTopN.length}, old: ${oldTopN.length}): ${selectedProvider.config.uuid} (weight: ${selectedWeight.toFixed(3)}, used: ${usagePercentage}%, remaining: ${remainingPercentage}%)`);
 
-        this._log('debug', `Top ${topCount} providers by weight, selected: ${selectedProvider.config.uuid} (weight: ${selectedWeight.toFixed(3)}, remaining: ${remainingPercentage}%)`);
+        this._log('debug', `Tiered selection - ${selectedTierName} tier (pool: ${candidatePool.length}), selected: ${selectedProvider.config.uuid} (weight: ${selectedWeight.toFixed(3)}, used: ${usagePercentage}%, remaining: ${remainingPercentage}%)`);
 
         // 始终更新 lastUsed（确保 LRU 策略生效，避免并发请求选到同一个 provider）
         // usageCount 只在请求成功后才增加（由 skipUsageCount 控制）
